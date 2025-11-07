@@ -362,9 +362,13 @@ function processSheet(spreadsheet, sheetName, config) {
     // 确保正式表有"记录ID"列
     ensureRecordIdColumn(mainSheet);
     
-    // 读取课程数据，传入配置信息
+    // 读取课程数据，传入配置信息（包含时区）
     const courses = readCourseData(mainSheet, config);
-    Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录`);
+    // 为每条课程记录添加时区信息
+    courses.forEach(course => {
+      course.timezone = config.timezone;
+    });
+    Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录，时区: ${config.timezone}`);
     
     // 读取已处理状态（在同步之前读取，以便检测被删除的记录）
     const statusSheet = spreadsheet.getSheetByName(statusSheetName);
@@ -408,7 +412,8 @@ function processSheet(spreadsheet, sheetName, config) {
       if (!existingRecord) {
         // 新记录，需要处理
         // 检查是否有相同课次但不同日期的旧记录（日期变化）
-        const oldRecords = findOldRecordsByLessonNumber(statusSheet, course.lessonNumber, course.date);
+        const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+        const oldRecords = findOldRecordsByLessonNumber(statusSheet, course.lessonNumber, course.date, timezone);
         if (oldRecords.length > 0) {
           Logger.log(`[${sheetName}] 检测到日期变化: ${course.lessonNumber}，将在处理时删除旧日期的日历事件`);
           // 标记需要删除的旧记录，在processCourse中处理（因为需要日历ID）
@@ -598,12 +603,18 @@ function readSheetConfig(spreadsheet) {
                              headerMap['studentemail'] ||
                              headerMap['学生邮件'];
   
+  const timezoneHeader = headerMap['时区'] || 
+                         headerMap['timezone'] || 
+                         headerMap['time zone'] ||
+                         headerMap['tz'];
+  
   Logger.log(`Sheet名称列索引: ${sheetNameHeader !== undefined ? sheetNameHeader : '未找到'}`);
   Logger.log(`启用状态列索引: ${enabledHeader !== undefined ? enabledHeader : '未找到'}`);
   Logger.log(`老师日历授权ID列索引: ${teacherCalendarIdHeader !== undefined ? teacherCalendarIdHeader : '未找到'}`);
   Logger.log(`学生日历授权ID列索引: ${studentCalendarIdHeader !== undefined ? studentCalendarIdHeader : '未找到'}`);
   Logger.log(`老师邮箱列索引: ${teacherEmailHeader !== undefined ? teacherEmailHeader : '未找到'}`);
   Logger.log(`学生邮箱列索引: ${studentEmailHeader !== undefined ? studentEmailHeader : '未找到'}`);
+  Logger.log(`时区列索引: ${timezoneHeader !== undefined ? timezoneHeader : '未找到'}`);
   
   if (sheetNameHeader === undefined) {
     const availableHeaders = Object.keys(headerMap).join(', ');
@@ -654,7 +665,8 @@ function readSheetConfig(spreadsheet) {
       teacherCalendarId: teacherCalendarIdHeader !== undefined ? (row[teacherCalendarIdHeader] || '').trim() : '',
       studentCalendarId: studentCalendarIdHeader !== undefined ? (row[studentCalendarIdHeader] || '').trim() : '',
       teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
-      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : ''
+      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
+      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE
     };
     
     // 如果邮箱为空，尝试使用日历ID作为邮箱
@@ -665,9 +677,15 @@ function readSheetConfig(spreadsheet) {
       config.studentEmail = config.studentCalendarId;
     }
     
+    // 如果时区为空，使用默认时区
+    if (!config.timezone) {
+      config.timezone = CONFIG.TIMEZONE;
+    }
+    
     Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
     Logger.log(`    老师日历ID: ${config.teacherCalendarId}, 老师邮箱: ${config.teacherEmail}`);
     Logger.log(`    学生日历ID: ${config.studentCalendarId}, 学生邮箱: ${config.studentEmail}`);
+    Logger.log(`    时区: ${config.timezone}`);
     
     sheetConfigMap.set(sheetNameTrimmed, config);
   }
@@ -1311,7 +1329,9 @@ function sendCancellationEmails(deletedRecord) {
   // 构建取消邮件内容
   const courseTitle = event.getTitle() || '课程';
   const eventDate = event.getStartTime();
-  const dateStr = Utilities.formatDate(eventDate, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  // 使用默认时区格式化日期（取消邮件时可能没有 course 对象）
+  const timezone = CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  const dateStr = Utilities.formatDate(eventDate, timezone, 'yyyy-MM-dd');
   
   // 发送给老师
   if (teacherEmail) {
@@ -1382,20 +1402,27 @@ function sendCancellationEmails(deletedRecord) {
 
 /**
  * 查找相同课次但不同日期的旧记录（用于检测日期变化）
+ * @param {Sheet} statusSheet - 状态表
+ * @param {string} lessonNumber - 课次
+ * @param {Date|string} currentDate - 当前日期
+ * @param {string} timezone - 时区（可选，默认使用脚本时区）
  */
-function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate) {
+function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, timezone) {
   const oldRecords = [];
   
   if (!statusSheet || statusSheet.getLastRow() < 2) {
     return oldRecords;
   }
   
+  // 获取时区（优先使用传入的时区，否则使用默认时区）
+  const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  
   const dataRange = statusSheet.getDataRange();
   const values = dataRange.getValues();
   
   // 标准化当前日期用于比较
   const currentDateStr = currentDate instanceof Date ?
-    Utilities.formatDate(currentDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') :
+    Utilities.formatDate(currentDate, tz, 'yyyy-MM-dd') :
     String(currentDate);
   
   for (let i = 1; i < values.length; i++) {
@@ -1406,7 +1433,7 @@ function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate) {
     // 如果课次相同但日期不同
     if (rowLessonNumber === lessonNumber && rowDate) {
       const rowDateStr = rowDate instanceof Date ?
-        Utilities.formatDate(rowDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') :
+        Utilities.formatDate(rowDate, tz, 'yyyy-MM-dd') :
         String(rowDate);
       
       if (rowDateStr !== currentDateStr) {
@@ -1565,19 +1592,23 @@ function deleteCalendarEvent(calendarId, eventId) {
 /**
  * 计算课程关键信息的token（用于检测变化）
  * 包括：日期、开始时间、结束时间、课程内容、老师、老师邮箱、学生、学生邮箱
+ * @param {Object} course - 课程对象，包含 timezone 属性
  */
 function calculateCourseToken(course) {
+  // 获取时区（优先使用课程配置的时区，否则使用默认时区）
+  const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  
   // 标准化日期和时间格式
   const dateStr = course.date instanceof Date ? 
-    Utilities.formatDate(course.date, Session.getScriptTimeZone(), 'yyyy-MM-dd') : 
+    Utilities.formatDate(course.date, timezone, 'yyyy-MM-dd') : 
     String(course.date);
   
   const startTimeStr = course.startTime instanceof Date ?
-    Utilities.formatDate(course.startTime, Session.getScriptTimeZone(), 'HH:mm') :
+    Utilities.formatDate(course.startTime, timezone, 'HH:mm') :
     String(course.startTime);
   
   const endTimeStr = course.endTime instanceof Date ?
-    Utilities.formatDate(course.endTime, Session.getScriptTimeZone(), 'HH:mm') :
+    Utilities.formatDate(course.endTime, timezone, 'HH:mm') :
     String(course.endTime);
   
   // 构建关键信息字符串
@@ -1820,7 +1851,9 @@ function syncStatusSheet(statusSheet, courseCount) {
  */
 function updateStatusRecord(statusSheet, course, result) {
   const now = new Date();
-  const nowStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+  // 使用课程配置的时区，如果没有则使用默认时区
+  const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  const nowStr = Utilities.formatDate(now, timezone, 'yyyy-MM-dd HH:mm:ss');
   
   // 使用course.rowIndex来确定状态表的行号
   // 状态表的第i行对应正式表的第i+1行（正式表有表头，状态表也有表头）

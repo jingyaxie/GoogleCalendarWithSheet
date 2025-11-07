@@ -291,7 +291,73 @@
 
 - 系统默认使用 `Asia/Shanghai` 时区
 - 日期和时间会按照该时区进行解析
-- 如需修改时区，请修改代码中的 `TIMEZONE` 配置
+- **支持动态时区配置**：可以在配置表中为每个 Sheet 设置不同的时区
+- 如果配置表中未设置时区，则使用默认时区 `Asia/Shanghai`
+
+#### 时区配置方法
+
+在配置表 `_SheetConfig` 中添加"时区"列，支持的时区格式如下：
+
+**支持的时区表头名称：**
+- `时区`
+- `Timezone`
+- `Time Zone`
+- `TZ`
+
+**主流时区格式示例：**
+
+| 国家/地区 | 时区标识符 | 说明 |
+|-----------|-----------|------|
+| 中国 | `Asia/Shanghai` | 中国标准时间（UTC+8） |
+| 中国香港 | `Asia/Hong_Kong` | 香港时间（UTC+8） |
+| 中国台湾 | `Asia/Taipei` | 台湾时间（UTC+8） |
+| 日本 | `Asia/Tokyo` | 日本标准时间（UTC+9） |
+| 韩国 | `Asia/Seoul` | 韩国标准时间（UTC+9） |
+| 新加坡 | `Asia/Singapore` | 新加坡时间（UTC+8） |
+| 印度 | `Asia/Kolkata` | 印度标准时间（UTC+5:30） |
+| 法国 | `Europe/Paris` | 法国时间（UTC+1，夏令时UTC+2） |
+| 英国 | `Europe/London` | 英国时间（UTC+0，夏令时UTC+1） |
+| 德国 | `Europe/Berlin` | 德国时间（UTC+1，夏令时UTC+2） |
+| 意大利 | `Europe/Rome` | 意大利时间（UTC+1，夏令时UTC+2） |
+| 西班牙 | `Europe/Madrid` | 西班牙时间（UTC+1，夏令时UTC+2） |
+| 美国东部 | `America/New_York` | 美国东部时间（UTC-5，夏令时UTC-4） |
+| 美国中部 | `America/Chicago` | 美国中部时间（UTC-6，夏令时UTC-5） |
+| 美国山地 | `America/Denver` | 美国山地时间（UTC-7，夏令时UTC-6） |
+| 美国西部 | `America/Los_Angeles` | 美国西部时间（UTC-8，夏令时UTC-7） |
+| 加拿大东部 | `America/Toronto` | 加拿大东部时间（UTC-5，夏令时UTC-4） |
+| 加拿大西部 | `America/Vancouver` | 加拿大西部时间（UTC-8，夏令时UTC-7） |
+| 澳大利亚东部 | `Australia/Sydney` | 澳大利亚东部时间（UTC+10，夏令时UTC+11） |
+| 澳大利亚西部 | `Australia/Perth` | 澳大利亚西部时间（UTC+8） |
+| 新西兰 | `Pacific/Auckland` | 新西兰时间（UTC+12，夏令时UTC+13） |
+| 巴西 | `America/Sao_Paulo` | 巴西时间（UTC-3） |
+| 墨西哥 | `America/Mexico_City` | 墨西哥时间（UTC-6，夏令时UTC-5） |
+| 俄罗斯莫斯科 | `Europe/Moscow` | 莫斯科时间（UTC+3） |
+| 俄罗斯远东 | `Asia/Vladivostok` | 俄罗斯远东时间（UTC+10） |
+| 阿联酋 | `Asia/Dubai` | 阿联酋时间（UTC+4） |
+| 沙特阿拉伯 | `Asia/Riyadh` | 沙特阿拉伯时间（UTC+3） |
+| 土耳其 | `Europe/Istanbul` | 土耳其时间（UTC+3） |
+| 南非 | `Africa/Johannesburg` | 南非时间（UTC+2） |
+| 埃及 | `Africa/Cairo` | 埃及时间（UTC+2） |
+
+**配置表示例：**
+
+| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 |
+|-----------|----------|---------------|---------------|----------|----------|------|
+| 中国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Asia/Shanghai |
+| 美国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | America/New_York |
+| 法国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Europe/Paris |
+
+**注意事项：**
+- 时区列是可选的，如果不配置，会使用默认时区 `Asia/Shanghai`
+- 每个 Sheet 可以有不同的时区
+- 时区会影响日期时间的解析和格式化
+- 使用 IANA 时区标识符（如 `Asia/Shanghai`），不要使用缩写（如 `CST`、`EST`）
+- 系统会自动处理夏令时（DST）转换
+- 时区信息会记录在日志中，方便调试
+
+**如何查找更多时区：**
+- 访问 [IANA 时区数据库](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+- 或使用 `America/`、`Europe/`、`Asia/` 等前缀搜索
 
 ### 邮件模板
 
