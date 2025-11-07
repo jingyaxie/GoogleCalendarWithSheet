@@ -47,6 +47,227 @@ const CONFIG = {
   }
 };
 
+// ==================== 菜单功能 ====================
+
+/**
+ * 当打开表格时自动创建自定义菜单
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  
+  // 创建自定义菜单
+  ui.createMenu('📅 课程同步')
+    .addItem('🔄 执行同步', 'menuRunSync')
+    .addSeparator()
+    .addItem('📋 查看配置', 'menuViewConfig')
+    .addItem('📊 查看状态表', 'menuViewStatus')
+    .addSeparator()
+    .addItem('ℹ️ 关于', 'menuAbout')
+    .addToUi();
+}
+
+/**
+ * 菜单项：执行同步
+ */
+function menuRunSync() {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.alert(
+      '确认执行同步',
+      '这将处理所有配置的课程表，发送邮件并创建日历事件。\n\n是否继续？',
+      ui.ButtonSet.YES_NO
+    );
+    
+    if (response === ui.Button.YES) {
+      // 执行主函数
+      main();
+      
+      // 显示完成提示
+      ui.alert(
+        '同步完成',
+        '课程同步已完成，请查看执行日志了解详细信息。',
+        ui.ButtonSet.OK
+      );
+    }
+  } catch (error) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '执行错误',
+      '同步过程中发生错误：\n' + error.message,
+      ui.ButtonSet.OK
+    );
+    Logger.log('菜单执行同步错误: ' + error.message);
+  }
+}
+
+/**
+ * 菜单项：查看配置
+ */
+function menuViewConfig() {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
+    
+    if (!configSheet) {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert(
+        '配置表不存在',
+        `找不到配置表 "${CONFIG.CONFIG_SHEET_NAME}"，请先创建配置表。`,
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // 激活配置表
+    configSheet.activate();
+    
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '配置表已打开',
+      '配置表已激活，请查看配置信息。',
+      ui.ButtonSet.OK
+    );
+  } catch (error) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '查看配置错误',
+      '查看配置时发生错误：\n' + error.message,
+      ui.ButtonSet.OK
+    );
+    Logger.log('查看配置错误: ' + error.message);
+  }
+}
+
+/**
+ * 菜单项：查看状态表
+ */
+function menuViewStatus() {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const ui = SpreadsheetApp.getUi();
+    
+    // 读取配置表，获取所有启用的 Sheet
+    const sheetConfigMap = readSheetConfig(spreadsheet);
+    
+    if (sheetConfigMap.size === 0) {
+      ui.alert(
+        '没有配置的 Sheet',
+        '配置表中没有启用的 Sheet，请先配置。',
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // 如果有多个 Sheet，让用户选择
+    const sheetNames = Array.from(sheetConfigMap.keys());
+    let selectedSheet = null;
+    
+    if (sheetNames.length === 1) {
+      selectedSheet = sheetNames[0];
+    } else {
+      // 创建选择对话框
+      const html = HtmlService.createHtmlOutput(`
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h3>选择要查看的 Sheet</h3>
+          <select id="sheetSelect" style="width: 100%; padding: 8px; margin: 10px 0;">
+            ${sheetNames.map(name => `<option value="${name}">${name}</option>`).join('')}
+          </select>
+          <button onclick="google.script.host.close(); google.script.run('menuViewStatusSheet', document.getElementById('sheetSelect').value)" 
+                  style="width: 100%; padding: 10px; background: #4285F4; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            查看状态表
+          </button>
+        </div>
+      `)
+        .setWidth(300)
+        .setHeight(150);
+      
+      ui.showModalDialog(html, '选择 Sheet');
+      return;
+    }
+    
+    // 显示状态表
+    menuViewStatusSheet(selectedSheet);
+    
+  } catch (error) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '查看状态表错误',
+      '查看状态表时发生错误：\n' + error.message,
+      ui.ButtonSet.OK
+    );
+    Logger.log('查看状态表错误: ' + error.message);
+  }
+}
+
+/**
+ * 查看指定 Sheet 的状态表
+ */
+function menuViewStatusSheet(sheetName) {
+  try {
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const statusSheetName = CONFIG.STATUS_SHEET_PREFIX + sheetName;
+    const statusSheet = spreadsheet.getSheetByName(statusSheetName);
+    
+    if (!statusSheet) {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert(
+        '状态表不存在',
+        `找不到状态表 "${statusSheetName}"，请先执行一次同步。`,
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // 显示状态表（取消隐藏）
+    statusSheet.showSheet();
+    statusSheet.activate();
+    
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '状态表已打开',
+      `状态表 "${statusSheetName}" 已激活并显示。`,
+      ui.ButtonSet.OK
+    );
+  } catch (error) {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert(
+      '查看状态表错误',
+      '查看状态表时发生错误：\n' + error.message,
+      ui.ButtonSet.OK
+    );
+    Logger.log('查看状态表错误: ' + error.message);
+  }
+}
+
+/**
+ * 菜单项：关于
+ */
+function menuAbout() {
+  const ui = SpreadsheetApp.getUi();
+  const html = HtmlService.createHtmlOutput(`
+    <div style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
+      <h2 style="color: #4285F4;">📅 课程同步系统</h2>
+      <p><strong>版本：</strong>2.0</p>
+      <p><strong>功能：</strong></p>
+      <ul>
+        <li>从配置表读取多个课程表</li>
+        <li>自动发送邮件通知给老师和学生</li>
+        <li>创建日历事件到老师和学生的日历</li>
+        <li>跟踪处理状态和记录ID</li>
+        <li>支持课程更新和删除</li>
+      </ul>
+      <p><strong>配置表：</strong>${CONFIG.CONFIG_SHEET_NAME}</p>
+      <p><strong>状态表前缀：</strong>${CONFIG.STATUS_SHEET_PREFIX}</p>
+      <hr>
+      <p style="color: #666; font-size: 12px;">使用菜单中的"执行同步"来开始处理课程数据。</p>
+    </div>
+  `)
+    .setWidth(400)
+    .setHeight(400);
+  
+  ui.showModalDialog(html, '关于');
+}
+
 // ==================== 主函数 ====================
 
 /**
