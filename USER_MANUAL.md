@@ -43,9 +43,14 @@
 1. 在 Google 表格中创建一个名为 `_SheetConfig` 的 Sheet（配置表）
 2. 在配置表中设置表头和数据，格式如下：
 
-| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 |
-|-----------|----------|---------------|---------------|----------|----------|
-| 张三同学课程表 | 是 | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com |
+| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 |
+|-----------|----------|---------------|---------------|----------|----------|------|
+| 张三同学课程表 | 是 | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | Asia/Shanghai |
+
+**注意：**
+- 时区列是可选的，如果不填写，会使用默认时区 `Asia/Shanghai`
+- 支持的时区格式请参考"时区设置"章节
+- 每个 Sheet 可以设置不同的时区
 
 ### 第二步：准备课程表
 
