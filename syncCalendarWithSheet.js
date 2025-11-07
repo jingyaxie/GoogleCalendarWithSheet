@@ -57,22 +57,22 @@ function main() {
   try {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     
-    // 从配置表读取要处理的 sheet 列表
-    const sheetNames = readSheetConfig(spreadsheet);
+    // 从配置表读取要处理的 sheet 配置信息
+    const sheetConfigMap = readSheetConfig(spreadsheet);
     
-    if (sheetNames.length === 0) {
+    if (sheetConfigMap.size === 0) {
       Logger.log('警告：没有找到需要处理的 sheet，请检查配置表 _SheetConfig');
       return;
     }
     
-    Logger.log(`从配置表读取到 ${sheetNames.length} 个需要处理的 sheet: ${sheetNames.join(', ')}`);
+    Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个需要处理的 sheet: ${Array.from(sheetConfigMap.keys()).join(', ')}`);
     
     // 循环处理每个 sheet
     const allResults = [];
-    for (const sheetName of sheetNames) {
+    for (const [sheetName, config] of sheetConfigMap) {
       try {
         Logger.log(`\n========== 开始处理 Sheet: ${sheetName} ==========`);
-        const result = processSheet(spreadsheet, sheetName);
+        const result = processSheet(spreadsheet, sheetName, config);
         allResults.push({
           sheetName: sheetName,
           success: result.success,
@@ -121,9 +121,10 @@ function main() {
  * 处理单个 Sheet 的所有课程记录
  * @param {Spreadsheet} spreadsheet - 表格对象
  * @param {string} sheetName - Sheet 名称
+ * @param {Object} config - Sheet 配置信息（包含邮箱和日历ID）
  * @returns {Object} 处理结果
  */
-function processSheet(spreadsheet, sheetName) {
+function processSheet(spreadsheet, sheetName, config) {
   try {
     // 获取主表
     const mainSheet = spreadsheet.getSheetByName(sheetName);
@@ -140,7 +141,8 @@ function processSheet(spreadsheet, sheetName) {
     // 确保正式表有"记录ID"列
     ensureRecordIdColumn(mainSheet);
     
-    const courses = readCourseData(mainSheet);
+    // 读取课程数据，传入配置信息
+    const courses = readCourseData(mainSheet, config);
     Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录`);
     
     // 读取已处理状态（在同步之前读取，以便检测被删除的记录）
@@ -274,9 +276,9 @@ function processSheet(spreadsheet, sheetName) {
 }
 
 /**
- * 从配置表读取要处理的 Sheet 列表
+ * 从配置表读取要处理的 Sheet 配置信息
  * @param {Spreadsheet} spreadsheet - 表格对象
- * @returns {Array<string>} Sheet 名称列表
+ * @returns {Map<string, Object>} Sheet 配置信息映射表，key为Sheet名称，value为配置对象
  */
 function readSheetConfig(spreadsheet) {
   // 先列出所有 sheet，用于调试
@@ -316,17 +318,28 @@ function readSheetConfig(spreadsheet) {
   });
   
   // 支持多种表头名称（更灵活的匹配）
-  const sheetNameHeader = headerMap['sheet名称'] || 
-                          headerMap['sheet name'] || 
-                          headerMap['名称'] || 
-                          headerMap['name'] || 
-                          headerMap['sheet'] || 
-                          headerMap['表名'] ||
-                          headerMap['sheet名称'] ||
-                          headerMap['工作表名称'] ||
-                          headerMap['工作表'] ||
-                          headerMap['tab名称'] ||
-                          headerMap['tab name'];
+  // 注意：headerMap 中的键都是小写的，所以查找时也要用小写
+  let sheetNameHeader = headerMap['sheet名称'] || 
+                        headerMap['sheet name'] || 
+                        headerMap['名称'] || 
+                        headerMap['name'] || 
+                        headerMap['sheet'] || 
+                        headerMap['表名'] ||
+                        headerMap['工作表名称'] ||
+                        headerMap['工作表'] ||
+                        headerMap['tab名称'] ||
+                        headerMap['tab name'];
+  
+  // 如果还没找到，尝试更宽松的匹配：遍历所有键，查找包含"sheet"或"名称"的键
+  if (sheetNameHeader === undefined) {
+    for (const key of Object.keys(headerMap)) {
+      if (key.includes('sheet') || key.includes('名称') || key === 'name' || key === '表名' || key.includes('工作表')) {
+        sheetNameHeader = headerMap[key];
+        Logger.log(`通过宽松匹配找到Sheet名称列: "${key}" (索引: ${sheetNameHeader})`);
+        break;
+      }
+    }
+  }
   
   const enabledHeader = headerMap['启用状态'] || 
                         headerMap['enabled'] || 
@@ -337,16 +350,47 @@ function readSheetConfig(spreadsheet) {
                         headerMap['enable'] ||
                         headerMap['active'];
   
+  // 读取邮箱和日历ID列
+  const teacherCalendarIdHeader = headerMap['老师日历授权id'] || 
+                                   headerMap['teacher calendar id'] || 
+                                   headerMap['老师日历id'] ||
+                                   headerMap['teachercalendarid'] ||
+                                   headerMap['老师日历授权id'] ||
+                                   headerMap['teacher calendar id'];
+  
+  const studentCalendarIdHeader = headerMap['学生日历授权id'] || 
+                                   headerMap['student calendar id'] || 
+                                   headerMap['学生日历id'] ||
+                                   headerMap['studentcalendarid'] ||
+                                   headerMap['学生日历授权id'] ||
+                                   headerMap['student calendar id'];
+  
+  const teacherEmailHeader = headerMap['老师邮箱'] || 
+                             headerMap['teacher email'] || 
+                             headerMap['老师email'] ||
+                             headerMap['teacheremail'] ||
+                             headerMap['老师邮件'];
+  
+  const studentEmailHeader = headerMap['学生邮箱'] || 
+                             headerMap['student email'] || 
+                             headerMap['学生email'] ||
+                             headerMap['studentemail'] ||
+                             headerMap['学生邮件'];
+  
   Logger.log(`Sheet名称列索引: ${sheetNameHeader !== undefined ? sheetNameHeader : '未找到'}`);
   Logger.log(`启用状态列索引: ${enabledHeader !== undefined ? enabledHeader : '未找到'}`);
+  Logger.log(`老师日历授权ID列索引: ${teacherCalendarIdHeader !== undefined ? teacherCalendarIdHeader : '未找到'}`);
+  Logger.log(`学生日历授权ID列索引: ${studentCalendarIdHeader !== undefined ? studentCalendarIdHeader : '未找到'}`);
+  Logger.log(`老师邮箱列索引: ${teacherEmailHeader !== undefined ? teacherEmailHeader : '未找到'}`);
+  Logger.log(`学生邮箱列索引: ${studentEmailHeader !== undefined ? studentEmailHeader : '未找到'}`);
   
   if (sheetNameHeader === undefined) {
     const availableHeaders = Object.keys(headerMap).join(', ');
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保第一列包含 Sheet 名称，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保包含 Sheet 名称的列，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
   }
   
-  // 读取启用的 Sheet 列表
-  const sheetNames = [];
+  // 读取启用的 Sheet 配置信息
+  const sheetConfigMap = new Map();
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     const sheetName = row[sheetNameHeader];
@@ -383,12 +427,32 @@ function readSheetConfig(spreadsheet) {
       continue;
     }
     
+    // 读取配置信息
+    const config = {
+      sheetName: sheetNameTrimmed,
+      teacherCalendarId: teacherCalendarIdHeader !== undefined ? (row[teacherCalendarIdHeader] || '').trim() : '',
+      studentCalendarId: studentCalendarIdHeader !== undefined ? (row[studentCalendarIdHeader] || '').trim() : '',
+      teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
+      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : ''
+    };
+    
+    // 如果邮箱为空，尝试使用日历ID作为邮箱
+    if (!config.teacherEmail && config.teacherCalendarId) {
+      config.teacherEmail = config.teacherCalendarId;
+    }
+    if (!config.studentEmail && config.studentCalendarId) {
+      config.studentEmail = config.studentCalendarId;
+    }
+    
     Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
-    sheetNames.push(sheetNameTrimmed);
+    Logger.log(`    老师日历ID: ${config.teacherCalendarId}, 老师邮箱: ${config.teacherEmail}`);
+    Logger.log(`    学生日历ID: ${config.studentCalendarId}, 学生邮箱: ${config.studentEmail}`);
+    
+    sheetConfigMap.set(sheetNameTrimmed, config);
   }
   
-  Logger.log(`从配置表读取到 ${sheetNames.length} 个启用的 Sheet: ${sheetNames.join(', ')}`);
-  return sheetNames;
+  Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个启用的 Sheet 配置`);
+  return sheetConfigMap;
 }
 
 /**
@@ -572,8 +636,11 @@ function processCourse(course, statusSheet) {
 
 /**
  * 读取课程数据
+ * @param {Sheet} sheet - 课程表对象
+ * @param {Object} config - Sheet 配置信息（包含邮箱和日历ID）
+ * @returns {Array<Object>} 课程数据数组
  */
-function readCourseData(sheet) {
+function readCourseData(sheet, config) {
   const dataRange = sheet.getDataRange();
   const values = dataRange.getValues();
   
@@ -604,13 +671,14 @@ function readCourseData(sheet) {
         date: row[headerMap['日期']] || '',
         courseTitle: row[headerMap['课程内容/主题']] || '',
         teacherName: row[headerMap['老师']] || '',
-        teacherEmail: row[headerMap['老师邮箱']] || '',
         studentName: row[headerMap['学生']] || '',
-        studentEmail: row[headerMap['学生邮箱']] || '',
         startTime: row[headerMap['开始时间']] || '',
         endTime: row[headerMap['结束时间']] || '',
-        teacherCalendarId: row[headerMap['老师日历授权ID']] || row[headerMap['老师邮箱']] || '',
-        studentCalendarId: row[headerMap['学生日历授权ID']] || row[headerMap['学生邮箱']] || '',
+        // 从配置中获取邮箱和日历ID
+        teacherEmail: config.teacherEmail || '',
+        studentEmail: config.studentEmail || '',
+        teacherCalendarId: config.teacherCalendarId || config.teacherEmail || '',
+        studentCalendarId: config.studentCalendarId || config.studentEmail || '',
         rowIndex: i + 1 // 记录行号（正式表的行号，从1开始，包含表头），用于和状态表一一对应
       };
       
