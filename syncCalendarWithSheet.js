@@ -10,11 +10,14 @@
 
 // ==================== 配置常量 ====================
 const CONFIG = {
-  // 主表名称（根据实际情况修改）
+  // 主表名称（根据实际情况修改，向后兼容使用）
   MAIN_SHEET_NAME: '课程安排',
   
-  // 隐藏状态表名称
-  STATUS_SHEET_NAME: '_StatusLog',
+  // 配置表名称（用于管理要处理的 sheet 列表）
+  CONFIG_SHEET_NAME: '_SheetConfig',
+  
+  // 隐藏状态表名称前缀（实际状态表名称 = STATUS_SHEET_PREFIX + Sheet名称）
+  STATUS_SHEET_PREFIX: '_StatusLog_',
   
   // 时区设置
   TIMEZONE: 'Asia/Shanghai',
@@ -48,40 +51,112 @@ const CONFIG = {
 
 /**
  * 主执行函数 - 处理所有课程记录
+ * 从配置表 _SheetConfig 读取要处理的 sheet 列表，然后循环处理每个 sheet
  */
 function main() {
   try {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     
-    // 确保隐藏状态表存在
-    ensureStatusSheet(spreadsheet);
+    // 从配置表读取要处理的 sheet 列表
+    const sheetNames = readSheetConfig(spreadsheet);
     
-    // 读取主表数据
-    const mainSheet = spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME);
-    if (!mainSheet) {
-      throw new Error(`找不到主表: ${CONFIG.MAIN_SHEET_NAME}`);
+    if (sheetNames.length === 0) {
+      Logger.log('警告：没有找到需要处理的 sheet，请检查配置表 _SheetConfig');
+      return;
     }
+    
+    Logger.log(`从配置表读取到 ${sheetNames.length} 个需要处理的 sheet: ${sheetNames.join(', ')}`);
+    
+    // 循环处理每个 sheet
+    const allResults = [];
+    for (const sheetName of sheetNames) {
+      try {
+        Logger.log(`\n========== 开始处理 Sheet: ${sheetName} ==========`);
+        const result = processSheet(spreadsheet, sheetName);
+        allResults.push({
+          sheetName: sheetName,
+          success: result.success,
+          total: result.total,
+          processed: result.processed,
+          failed: result.failed,
+          error: result.error
+        });
+        Logger.log(`========== Sheet ${sheetName} 处理完成 ==========\n`);
+      } catch (error) {
+        Logger.log(`处理 Sheet ${sheetName} 时发生错误: ${error.message}`);
+        allResults.push({
+          sheetName: sheetName,
+          success: false,
+          total: 0,
+          processed: 0,
+          failed: 0,
+          error: error.message
+        });
+      }
+    }
+    
+    // 输出汇总结果
+    Logger.log('\n=== 所有 Sheet 处理结果汇总 ===');
+    let totalSuccess = 0;
+    let totalFailed = 0;
+    let totalProcessed = 0;
+    for (const result of allResults) {
+      if (result.success) {
+        totalSuccess++;
+      } else {
+        totalFailed++;
+      }
+      totalProcessed += result.processed;
+      Logger.log(`${result.sheetName}: ${result.success ? '成功' : '失败'} - 处理 ${result.processed} 条记录${result.error ? ` (错误: ${result.error})` : ''}`);
+    }
+    Logger.log(`总计: 成功 ${totalSuccess}, 失败 ${totalFailed}, 共处理 ${totalProcessed} 条记录`);
+    
+  } catch (error) {
+    Logger.log(`主函数执行失败: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * 处理单个 Sheet 的所有课程记录
+ * @param {Spreadsheet} spreadsheet - 表格对象
+ * @param {string} sheetName - Sheet 名称
+ * @returns {Object} 处理结果
+ */
+function processSheet(spreadsheet, sheetName) {
+  try {
+    // 获取主表
+    const mainSheet = spreadsheet.getSheetByName(sheetName);
+    if (!mainSheet) {
+      throw new Error(`找不到 Sheet: ${sheetName}`);
+    }
+    
+    // 生成状态表名称
+    const statusSheetName = CONFIG.STATUS_SHEET_PREFIX + sheetName;
+    
+    // 确保隐藏状态表存在
+    ensureStatusSheet(spreadsheet, statusSheetName);
     
     // 确保正式表有"记录ID"列
     ensureRecordIdColumn(mainSheet);
     
     const courses = readCourseData(mainSheet);
-    Logger.log(`读取到 ${courses.length} 条课程记录`);
+    Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录`);
     
     // 读取已处理状态（在同步之前读取，以便检测被删除的记录）
-    const statusSheet = spreadsheet.getSheetByName(CONFIG.STATUS_SHEET_NAME);
+    const statusSheet = spreadsheet.getSheetByName(statusSheetName);
     const processedRecords = readProcessedStatus(statusSheet);
     
     // 检测被删除的记录（在同步状态表之前检测，避免状态表被删除后无法检测）
     const deletedRecords = findDeletedRecords(courses, processedRecords, statusSheet);
     if (deletedRecords.length > 0) {
-      Logger.log(`检测到 ${deletedRecords.length} 条被删除的记录，将取消课程`);
+      Logger.log(`[${sheetName}] 检测到 ${deletedRecords.length} 条被删除的记录，将取消课程`);
       for (const deletedRecord of deletedRecords) {
         try {
           cancelCourse(deletedRecord, statusSheet);
-          Logger.log(`取消课程成功: ${deletedRecord.lessonNumber} - ${deletedRecord.date}`);
+          Logger.log(`[${sheetName}] 取消课程成功: ${deletedRecord.lessonNumber} - ${deletedRecord.date}`);
         } catch (error) {
-          Logger.log(`取消课程失败: ${deletedRecord.lessonNumber} - ${error.message}`);
+          Logger.log(`[${sheetName}] 取消课程失败: ${deletedRecord.lessonNumber} - ${error.message}`);
         }
       }
     }
@@ -112,7 +187,7 @@ function main() {
         // 检查是否有相同课次但不同日期的旧记录（日期变化）
         const oldRecords = findOldRecordsByLessonNumber(statusSheet, course.lessonNumber, course.date);
         if (oldRecords.length > 0) {
-          Logger.log(`检测到日期变化: ${course.lessonNumber}，将在处理时删除旧日期的日历事件`);
+          Logger.log(`[${sheetName}] 检测到日期变化: ${course.lessonNumber}，将在处理时删除旧日期的日历事件`);
           // 标记需要删除的旧记录，在processCourse中处理（因为需要日历ID）
           course._oldRecords = oldRecords;
         }
@@ -125,21 +200,21 @@ function main() {
       
       // 如果token不同，说明关键信息有变化，需要更新
       if (currentToken !== existingToken) {
-        Logger.log(`检测到关键信息变化: ${course.lessonNumber} (旧token: ${existingToken}, 新token: ${currentToken})`);
+        Logger.log(`[${sheetName}] 检测到关键信息变化: ${course.lessonNumber} (旧token: ${existingToken}, 新token: ${currentToken})`);
         return true;
       }
       
       // token相同，说明关键信息没有变化
       // 检查是否已有日历事件ID，如果有则完全跳过（不发送邮件也不更新日历）
       if (existingRecord.teacherEventId || existingRecord.studentEventId) {
-        Logger.log(`跳过处理（token相同且已有日历事件）: ${course.lessonNumber}`);
+        Logger.log(`[${sheetName}] 跳过处理（token相同且已有日历事件）: ${course.lessonNumber}`);
         return false;
       }
       
       // token相同但没有日历事件ID，可能是之前创建失败，需要重试
       // 但只有在状态不是已完成时才处理
       if (existingRecord.status !== '已完成') {
-        Logger.log(`重试处理（token相同但之前失败）: ${course.lessonNumber}`);
+        Logger.log(`[${sheetName}] 重试处理（token相同但之前失败）: ${course.lessonNumber}`);
         return true;
       }
       
@@ -147,7 +222,7 @@ function main() {
       return false;
     });
     
-    Logger.log(`需要处理 ${toProcess.length} 条记录`);
+    Logger.log(`[${sheetName}] 需要处理 ${toProcess.length} 条记录`);
     
     // 处理每条记录
     const results = [];
@@ -155,9 +230,9 @@ function main() {
       try {
         const result = processCourse(course, statusSheet);
         results.push(result);
-        Logger.log(`处理完成: ${course.lessonNumber} - ${result.status}`);
+        Logger.log(`[${sheetName}] 处理完成: ${course.lessonNumber} - ${result.status}`);
       } catch (error) {
-        Logger.log(`处理失败: ${course.lessonNumber} - ${error.message}`);
+        Logger.log(`[${sheetName}] 处理失败: ${course.lessonNumber} - ${error.message}`);
         results.push({
           course: course,
           status: '失败',
@@ -167,23 +242,153 @@ function main() {
     }
     
     // 输出处理结果
-    Logger.log('=== 处理结果汇总 ===');
-    const successCount = results.filter(r => r.status === '已完成').length;
-    const failCount = results.length - successCount;
-    Logger.log(`成功: ${successCount}, 失败: ${failCount}`);
+    Logger.log(`\n[${sheetName}] === 处理结果汇总 ===`);
+    let successCount = 0;
+    let failedCount = 0;
+    for (const result of results) {
+      if (result.status === '已完成') {
+        successCount++;
+      } else {
+        failedCount++;
+      }
+    }
+    Logger.log(`[${sheetName}] 成功: ${successCount}, 失败: ${failedCount}`);
     
     return {
-      total: results.length,
-      success: successCount,
-      failed: failCount,
-      results: results
+      success: true,
+      total: courses.length,
+      processed: toProcess.length,
+      failed: failedCount
     };
     
   } catch (error) {
-    Logger.log(`主函数执行错误: ${error.message}`);
-    Logger.log(error.stack);
-    throw error;
+    Logger.log(`处理 Sheet ${sheetName} 失败: ${error.message}`);
+    return {
+      success: false,
+      total: 0,
+      processed: 0,
+      failed: 0,
+      error: error.message
+    };
   }
+}
+
+/**
+ * 从配置表读取要处理的 Sheet 列表
+ * @param {Spreadsheet} spreadsheet - 表格对象
+ * @returns {Array<string>} Sheet 名称列表
+ */
+function readSheetConfig(spreadsheet) {
+  // 先列出所有 sheet，用于调试
+  const allSheets = spreadsheet.getSheets();
+  const allSheetNames = allSheets.map(s => s.getName());
+  Logger.log(`当前表格中的所有 Sheet: ${allSheetNames.join(', ')}`);
+  Logger.log(`正在查找配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
+  
+  const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
+  
+  // 如果配置表不存在，直接报错
+  if (!configSheet) {
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 不存在，请先创建配置表`);
+  }
+  
+  Logger.log(`✓ 找到配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
+  
+  // 读取配置表数据
+  const dataRange = configSheet.getDataRange();
+  const values = dataRange.getValues();
+  
+  Logger.log(`配置表数据行数: ${values.length}`);
+  
+  if (values.length < 2) {
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 没有数据（只有表头），请至少添加一行数据`);
+  }
+  
+  // 解析表头，找到"Sheet名称"和"启用状态"列
+  const headers = values[0];
+  Logger.log(`配置表表头: ${headers.join(', ')}`);
+  
+  const headerMap = {};
+  headers.forEach((header, index) => {
+    const normalizedHeader = String(header).trim().toLowerCase();
+    headerMap[normalizedHeader] = index;
+    Logger.log(`  表头[${index}]: "${header}" -> 标准化: "${normalizedHeader}"`);
+  });
+  
+  // 支持多种表头名称（更灵活的匹配）
+  const sheetNameHeader = headerMap['sheet名称'] || 
+                          headerMap['sheet name'] || 
+                          headerMap['名称'] || 
+                          headerMap['name'] || 
+                          headerMap['sheet'] || 
+                          headerMap['表名'] ||
+                          headerMap['sheet名称'] ||
+                          headerMap['工作表名称'] ||
+                          headerMap['工作表'] ||
+                          headerMap['tab名称'] ||
+                          headerMap['tab name'];
+  
+  const enabledHeader = headerMap['启用状态'] || 
+                        headerMap['enabled'] || 
+                        headerMap['启用'] || 
+                        headerMap['状态'] || 
+                        headerMap['status'] || 
+                        headerMap['是否启用'] ||
+                        headerMap['enable'] ||
+                        headerMap['active'];
+  
+  Logger.log(`Sheet名称列索引: ${sheetNameHeader !== undefined ? sheetNameHeader : '未找到'}`);
+  Logger.log(`启用状态列索引: ${enabledHeader !== undefined ? enabledHeader : '未找到'}`);
+  
+  if (sheetNameHeader === undefined) {
+    const availableHeaders = Object.keys(headerMap).join(', ');
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保第一列包含 Sheet 名称，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
+  }
+  
+  // 读取启用的 Sheet 列表
+  const sheetNames = [];
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const sheetName = row[sheetNameHeader];
+    
+    Logger.log(`读取第 ${i + 1} 行: Sheet名称="${sheetName}"`);
+    
+    // 跳过空行
+    if (!sheetName || String(sheetName).trim() === '') {
+      Logger.log(`  跳过空行`);
+      continue;
+    }
+    
+    const sheetNameTrimmed = String(sheetName).trim();
+    
+    // 检查启用状态（如果存在启用状态列）
+    if (enabledHeader !== undefined) {
+      const enabled = row[enabledHeader];
+      const enabledStr = String(enabled).trim().toLowerCase();
+      Logger.log(`  启用状态: "${enabled}" -> 标准化: "${enabledStr}"`);
+      // 支持多种表示方式：是/Yes/1/true/启用
+      if (enabledStr !== '是' && enabledStr !== 'yes' && enabledStr !== '1' && enabledStr !== 'true' && enabledStr !== '启用' && enabledStr !== 'enabled') {
+        Logger.log(`  跳过未启用的 Sheet: ${sheetNameTrimmed}`);
+        continue;
+      }
+    } else {
+      Logger.log(`  未找到启用状态列，默认启用`);
+    }
+    
+    // 验证 Sheet 是否存在
+    const sheet = spreadsheet.getSheetByName(sheetNameTrimmed);
+    if (!sheet) {
+      Logger.log(`  警告：配置的 Sheet "${sheetNameTrimmed}" 不存在，已跳过`);
+      Logger.log(`  当前所有 Sheet: ${allSheetNames.join(', ')}`);
+      continue;
+    }
+    
+    Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
+    sheetNames.push(sheetNameTrimmed);
+  }
+  
+  Logger.log(`从配置表读取到 ${sheetNames.length} 个启用的 Sheet: ${sheetNames.join(', ')}`);
+  return sheetNames;
 }
 
 /**
@@ -1245,13 +1450,19 @@ function createCalendarEvent(calendarId, course) {
 
 /**
  * 确保状态表存在
+ * @param {Spreadsheet} spreadsheet - 表格对象
+ * @param {string} statusSheetName - 状态表名称（可选，如果不提供则使用默认名称）
+ * @returns {Sheet} 状态表对象
  */
-function ensureStatusSheet(spreadsheet) {
-  let statusSheet = spreadsheet.getSheetByName(CONFIG.STATUS_SHEET_NAME);
+function ensureStatusSheet(spreadsheet, statusSheetName) {
+  // 如果没有提供状态表名称，使用默认名称（向后兼容）
+  const targetStatusSheetName = statusSheetName || CONFIG.STATUS_SHEET_PREFIX + CONFIG.MAIN_SHEET_NAME;
+  
+  let statusSheet = spreadsheet.getSheetByName(targetStatusSheetName);
   
   if (!statusSheet) {
     // 创建隐藏表
-    statusSheet = spreadsheet.insertSheet(CONFIG.STATUS_SHEET_NAME);
+    statusSheet = spreadsheet.insertSheet(targetStatusSheetName);
     statusSheet.hideSheet(); // 隐藏表
     
     // 设置表头（索引表结构）
@@ -1283,7 +1494,7 @@ function ensureStatusSheet(spreadsheet) {
     // 冻结首行
     statusSheet.setFrozenRows(1);
     
-    Logger.log(`创建状态表: ${CONFIG.STATUS_SHEET_NAME}`);
+    Logger.log(`创建状态表: ${targetStatusSheetName}`);
   }
   
   return statusSheet;
@@ -1486,13 +1697,14 @@ function formatDate(dateInput) {
  */
 function testSingleRecord() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  ensureStatusSheet(spreadsheet);
+  const statusSheetName = CONFIG.STATUS_SHEET_PREFIX + CONFIG.MAIN_SHEET_NAME;
+  ensureStatusSheet(spreadsheet, statusSheetName);
   
   const mainSheet = spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME);
   const courses = readCourseData(mainSheet);
   
   if (courses.length > 0) {
-    const statusSheet = spreadsheet.getSheetByName(CONFIG.STATUS_SHEET_NAME);
+    const statusSheet = spreadsheet.getSheetByName(statusSheetName);
     const result = processCourse(courses[0], statusSheet);
     Logger.log(JSON.stringify(result, null, 2));
   } else {
