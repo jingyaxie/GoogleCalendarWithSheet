@@ -22,6 +22,18 @@ const CONFIG = {
   // 时区设置
   TIMEZONE: 'Asia/Shanghai',
   
+  // 速率限制配置
+  RATE_LIMIT: {
+    // 每次操作之间的延迟（毫秒）
+    DELAY_BETWEEN_OPERATIONS: 500,
+    // 重试次数
+    MAX_RETRIES: 3,
+    // 重试延迟（毫秒）
+    RETRY_DELAY: 2000,
+    // 速率限制错误的关键词
+    RATE_LIMIT_KEYWORDS: ['too many', 'rate limit', 'quota', 'try again later']
+  },
+  
   // 邮件模板
   EMAIL_TEMPLATE: {
     subject: '课程通知：{courseTitle}',
@@ -797,8 +809,14 @@ function processCourse(course, statusSheet) {
               deleteCalendarEventById(oldRecord.teacherEventId);
               Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
             }
+            // 添加延迟，避免速率限制
+            addOperationDelay();
           } catch (error) {
             Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
+            // 如果是速率限制错误，记录详细信息
+            if (isRateLimitError(error)) {
+              Logger.log(`⚠️ 删除旧老师日历事件遇到速率限制，可能需要稍后重试`);
+            }
           }
         }
         
@@ -814,8 +832,14 @@ function processCourse(course, statusSheet) {
               deleteCalendarEventById(oldRecord.studentEventId);
               Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
             }
+            // 添加延迟，避免速率限制
+            addOperationDelay();
           } catch (error) {
             Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
+            // 如果是速率限制错误，记录详细信息
+            if (isRateLimitError(error)) {
+              Logger.log(`⚠️ 删除旧学生日历事件遇到速率限制，可能需要稍后重试`);
+            }
           }
         }
       }
@@ -870,9 +894,15 @@ function processCourse(course, statusSheet) {
           result.teacherEmail.error = '创建事件成功但未返回事件ID';
           Logger.log(`老师日历事件处理失败: 创建事件成功但未返回事件ID`);
         }
+        // 添加延迟，避免速率限制
+        addOperationDelay();
       } catch (error) {
         result.teacherEmail.error = error.message;
         Logger.log(`老师日历事件处理失败: ${error.message}`);
+        // 如果是速率限制错误，记录详细信息
+        if (isRateLimitError(error)) {
+          Logger.log(`⚠️ 老师日历事件遇到速率限制，可能需要稍后重试`);
+        }
         // 即使创建失败，也尝试保留已有的事件ID（如果有）
         if (existingInfo.teacherEventId) {
           result.teacherEmail.eventId = String(existingInfo.teacherEventId);
@@ -925,9 +955,15 @@ function processCourse(course, statusSheet) {
           result.studentEmail.error = '创建事件成功但未返回事件ID';
           Logger.log(`学生日历事件处理失败: 创建事件成功但未返回事件ID`);
         }
+        // 添加延迟，避免速率限制
+        addOperationDelay();
       } catch (error) {
         result.studentEmail.error = error.message;
         Logger.log(`学生日历事件处理失败: ${error.message}`);
+        // 如果是速率限制错误，记录详细信息
+        if (isRateLimitError(error)) {
+          Logger.log(`⚠️ 学生日历事件遇到速率限制，可能需要稍后重试`);
+        }
         // 即使创建失败，也尝试保留已有的事件ID（如果有）
         if (existingInfo.studentEventId) {
           result.studentEmail.eventId = String(existingInfo.studentEventId);
@@ -1307,8 +1343,14 @@ function cancelCourse(deletedRecord, statusSheet) {
         deleteCalendarEventById(deletedRecord.teacherEventId);
         Logger.log(`删除老师日历事件成功: ${deletedRecord.teacherEventId}`);
       }
+      // 添加延迟，避免速率限制
+      addOperationDelay();
     } catch (error) {
       Logger.log(`删除老师日历事件失败: ${deletedRecord.teacherEventId} - ${error.message}`);
+      // 如果是速率限制错误，记录详细信息
+      if (isRateLimitError(error)) {
+        Logger.log(`⚠️ 删除老师日历事件遇到速率限制，可能需要稍后重试`);
+      }
     }
   }
   
@@ -1324,8 +1366,14 @@ function cancelCourse(deletedRecord, statusSheet) {
         deleteCalendarEventById(deletedRecord.studentEventId);
         Logger.log(`删除学生日历事件成功: ${deletedRecord.studentEventId}`);
       }
+      // 添加延迟，避免速率限制
+      addOperationDelay();
     } catch (error) {
       Logger.log(`删除学生日历事件失败: ${deletedRecord.studentEventId} - ${error.message}`);
+      // 如果是速率限制错误，记录详细信息
+      if (isRateLimitError(error)) {
+        Logger.log(`⚠️ 删除学生日历事件遇到速率限制，可能需要稍后重试`);
+      }
     }
   }
   
@@ -1358,11 +1406,15 @@ function deleteCalendarEventById(eventId) {
     try {
       const event = calendar.getEventById(eventId);
       if (event) {
-        event.deleteEvent();
+        deleteEventWithRetry(event);
         Logger.log(`删除日历事件成功: ${eventId} (日历: ${calendar.getName()})`);
         return; // 找到并删除后退出
       }
     } catch (error) {
+      // 如果是速率限制错误，记录并继续
+      if (isRateLimitError(error)) {
+        Logger.log(`删除日历事件时遇到速率限制: ${eventId} - ${error.message}`);
+      }
       // 继续尝试下一个日历
       continue;
     }
@@ -1716,13 +1768,17 @@ function deleteCalendarEvent(calendarId, eventId) {
     
     const event = calendar.getEventById(eventId);
     if (event) {
-      event.deleteEvent();
+      deleteEventWithRetry(event);
       Logger.log(`删除日历事件成功: ${eventId} (日历: ${calendarId})`);
     } else {
       Logger.log(`找不到日历事件: ${eventId} (日历: ${calendarId})`);
     }
   } catch (error) {
     Logger.log(`删除日历事件失败: ${eventId} (日历: ${calendarId}) - ${error.message}`);
+    // 如果是速率限制错误，抛出异常以便上层处理
+    if (isRateLimitError(error)) {
+      throw error;
+    }
   }
 }
 
@@ -1803,6 +1859,184 @@ function sendCourseEmail(recipientEmail, recipientName, course, otherPartyName) 
   });
 }
 
+// ==================== 速率限制处理模块 ====================
+
+/**
+ * 检查是否是速率限制错误
+ * @param {Error} error - 错误对象
+ * @returns {boolean} 是否是速率限制错误
+ */
+function isRateLimitError(error) {
+  if (!error || !error.message) {
+    return false;
+  }
+  
+  const errorMessage = error.message.toLowerCase();
+  return CONFIG.RATE_LIMIT.RATE_LIMIT_KEYWORDS.some(keyword => 
+    errorMessage.includes(keyword.toLowerCase())
+  );
+}
+
+/**
+ * 带重试的创建日历事件
+ * @param {Calendar} calendar - 日历对象
+ * @param {string} title - 事件标题
+ * @param {Date} startTime - 开始时间
+ * @param {Date} endTime - 结束时间
+ * @param {Object} options - 选项（description, guests, sendInvites）
+ * @returns {CalendarEvent} 创建的事件对象
+ */
+function createEventWithRetry(calendar, title, startTime, endTime, options) {
+  let lastError;
+  const maxRetries = CONFIG.RATE_LIMIT.MAX_RETRIES;
+  const retryDelay = CONFIG.RATE_LIMIT.RETRY_DELAY;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 添加延迟（除了第一次尝试）
+      if (attempt > 1) {
+        Logger.log(`重试创建日历事件（第${attempt}次尝试）...`);
+        Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
+      }
+      
+      const event = calendar.createEvent(title, startTime, endTime, options);
+      return event;
+    } catch (error) {
+      lastError = error;
+      
+      if (isRateLimitError(error)) {
+        Logger.log(`遇到速率限制错误（第${attempt}次尝试）: ${error.message}`);
+        if (attempt < maxRetries) {
+          Logger.log(`等待 ${retryDelay * attempt} 毫秒后重试...`);
+          continue;
+        } else {
+          Logger.log(`已达到最大重试次数（${maxRetries}），放弃创建事件`);
+          throw new Error(`创建日历事件失败（速率限制）: ${error.message}`);
+        }
+      } else {
+        // 非速率限制错误，直接抛出
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError || new Error('创建日历事件失败');
+}
+
+/**
+ * 带重试的删除日历事件
+ * @param {CalendarEvent} event - 事件对象
+ */
+function deleteEventWithRetry(event) {
+  let lastError;
+  const maxRetries = CONFIG.RATE_LIMIT.MAX_RETRIES;
+  const retryDelay = CONFIG.RATE_LIMIT.RETRY_DELAY;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 添加延迟（除了第一次尝试）
+      if (attempt > 1) {
+        Logger.log(`重试删除日历事件（第${attempt}次尝试）...`);
+        Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
+      }
+      
+      event.deleteEvent();
+      return;
+    } catch (error) {
+      lastError = error;
+      
+      if (isRateLimitError(error)) {
+        Logger.log(`遇到速率限制错误（第${attempt}次尝试）: ${error.message}`);
+        if (attempt < maxRetries) {
+          Logger.log(`等待 ${retryDelay * attempt} 毫秒后重试...`);
+          continue;
+        } else {
+          Logger.log(`已达到最大重试次数（${maxRetries}），放弃删除事件`);
+          throw new Error(`删除日历事件失败（速率限制）: ${error.message}`);
+        }
+      } else {
+        // 非速率限制错误，直接抛出
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError || new Error('删除日历事件失败');
+}
+
+/**
+ * 带重试的更新日历事件
+ * @param {CalendarEvent} event - 事件对象
+ * @param {string} title - 事件标题
+ * @param {string} description - 事件描述
+ * @param {Date} startTime - 开始时间
+ * @param {Date} endTime - 结束时间
+ * @param {string} guests - 参与者列表（逗号分隔）
+ */
+function updateEventWithRetry(event, title, description, startTime, endTime, guests) {
+  let lastError;
+  const maxRetries = CONFIG.RATE_LIMIT.MAX_RETRIES;
+  const retryDelay = CONFIG.RATE_LIMIT.RETRY_DELAY;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // 添加延迟（除了第一次尝试）
+      if (attempt > 1) {
+        Logger.log(`重试更新日历事件（第${attempt}次尝试）...`);
+        Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
+      }
+      
+      // 更新事件信息
+      event.setTitle(title);
+      event.setDescription(description);
+      event.setTime(startTime, endTime);
+      
+      // 更新参与者（使用正确的方法）
+      // 先获取现有参与者列表
+      const existingGuests = event.getGuestList();
+      const existingEmails = existingGuests.map(guest => guest.getEmail());
+      const newEmails = guests.split(',').map(email => email.trim());
+      
+      // 添加新参与者
+      for (const email of newEmails) {
+        if (email && !existingEmails.includes(email)) {
+          event.addGuest(email);
+        }
+      }
+      
+      // 移除不在新列表中的参与者（可选，根据需求决定）
+      // 这里不删除，只添加新的参与者
+      
+      return;
+    } catch (error) {
+      lastError = error;
+      
+      if (isRateLimitError(error)) {
+        Logger.log(`遇到速率限制错误（第${attempt}次尝试）: ${error.message}`);
+        if (attempt < maxRetries) {
+          Logger.log(`等待 ${retryDelay * attempt} 毫秒后重试...`);
+          continue;
+        } else {
+          Logger.log(`已达到最大重试次数（${maxRetries}），放弃更新事件`);
+          throw new Error(`更新日历事件失败（速率限制）: ${error.message}`);
+        }
+      } else {
+        // 非速率限制错误，直接抛出
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError || new Error('更新日历事件失败');
+}
+
+/**
+ * 添加操作延迟（用于避免速率限制）
+ */
+function addOperationDelay() {
+  Utilities.sleep(CONFIG.RATE_LIMIT.DELAY_BETWEEN_OPERATIONS);
+}
+
 // ==================== 日历事件创建模块 ====================
 
 /**
@@ -1850,26 +2084,8 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
     try {
       event = calendar.getEventById(existingEventId);
       
-      // 更新事件信息
-      event.setTitle(eventSummary);
-      event.setDescription(eventDescription);
-      event.setTime(eventStart, eventEnd);
-      
-      // 更新参与者（使用正确的方法）
-      // 先获取现有参与者列表
-      const existingGuests = event.getGuestList();
-      const existingEmails = existingGuests.map(guest => guest.getEmail());
-      const newEmails = eventGuests.split(',').map(email => email.trim());
-      
-      // 添加新参与者
-      for (const email of newEmails) {
-        if (email && !existingEmails.includes(email)) {
-          event.addGuest(email);
-        }
-      }
-      
-      // 移除不在新列表中的参与者（可选，根据需求决定）
-      // 这里不删除，只添加新的参与者
+      // 更新事件信息（带速率限制处理）
+      updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests);
       
       Logger.log(`更新日历事件: ${existingEventId}`);
       return existingEventId;
@@ -1880,8 +2096,9 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
     }
   }
   
-  // 创建新事件
-  event = calendar.createEvent(
+  // 创建新事件（带速率限制处理）
+  event = createEventWithRetry(
+    calendar,
     eventSummary,
     eventStart,
     eventEnd,
