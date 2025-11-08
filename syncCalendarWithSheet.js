@@ -333,16 +333,25 @@ function main() {
     let totalSuccess = 0;
     let totalFailed = 0;
     let totalProcessed = 0;
+    let totalRecordsSuccess = 0;
+    let totalRecordsFailed = 0;
     for (const result of allResults) {
-      if (result.success) {
+      // 判断 Sheet 是否成功：如果没有错误且没有失败的记录，则算作成功
+      const sheetSuccess = result.success && result.failed === 0;
+      if (sheetSuccess) {
         totalSuccess++;
       } else {
         totalFailed++;
       }
       totalProcessed += result.processed;
-      Logger.log(`${result.sheetName}: ${result.success ? '成功' : '失败'} - 处理 ${result.processed} 条记录${result.error ? ` (错误: ${result.error})` : ''}`);
+      // 计算成功和失败的记录数
+      const recordsSuccess = result.processed - (result.failed || 0);
+      totalRecordsSuccess += recordsSuccess;
+      totalRecordsFailed += (result.failed || 0);
+      
+      Logger.log(`${result.sheetName}: ${sheetSuccess ? '成功' : '失败'} - 处理 ${result.processed} 条记录（成功 ${recordsSuccess}, 失败 ${result.failed || 0}）${result.error ? ` (错误: ${result.error})` : ''}`);
     }
-    Logger.log(`总计: 成功 ${totalSuccess}, 失败 ${totalFailed}, 共处理 ${totalProcessed} 条记录`);
+    Logger.log(`总计: 成功 ${totalSuccess} 个 Sheet, 失败 ${totalFailed} 个 Sheet, 共处理 ${totalProcessed} 条记录（成功 ${totalRecordsSuccess}, 失败 ${totalRecordsFailed}）`);
     
   } catch (error) {
     Logger.log(`主函数执行失败: ${error.message}`);
