@@ -433,10 +433,86 @@ function processSheet(spreadsheet, sheetName, config) {
       }
       
       // token相同，说明关键信息没有变化
-      // 检查是否已有日历事件ID，如果有则完全跳过（不发送邮件也不更新日历）
-      if (existingRecord.teacherEventId || existingRecord.studentEventId) {
-        Logger.log(`[${sheetName}] 跳过处理（token相同且已有日历事件）: ${course.lessonNumber}`);
-        return false;
+      // 检查是否已有日历事件ID，如果有则验证事件是否真实存在
+      // 注意：只有当事件ID非空字符串时才检查
+      const hasTeacherEventId = existingRecord.teacherEventId && String(existingRecord.teacherEventId).trim() !== '';
+      const hasStudentEventId = existingRecord.studentEventId && String(existingRecord.studentEventId).trim() !== '';
+      
+      if (hasTeacherEventId || hasStudentEventId) {
+        // 验证事件是否真实存在于日历中
+        let teacherEventExists = false;
+        let studentEventExists = false;
+        let needRecreate = false;
+        
+        // 验证老师日历事件（只有当事件ID非空时才验证）
+        if (hasTeacherEventId && existingRecord.teacherCalendarId) {
+          try {
+            teacherEventExists = verifyCalendarEventExists(existingRecord.teacherCalendarId, existingRecord.teacherEventId);
+            if (!teacherEventExists) {
+              Logger.log(`[${sheetName}] 老师日历事件不存在（可能被删除）: ${existingRecord.teacherEventId}，将重新创建`);
+              needRecreate = true;
+              // 更新状态表，清除无效的事件ID
+              statusSheet.getRange(existingRecord.rowIndex, 8).setValue(''); // 第8列是老师日历事件ID
+              existingRecord.teacherEventId = '';
+            }
+          } catch (error) {
+            Logger.log(`[${sheetName}] 验证老师日历事件失败: ${existingRecord.teacherEventId} - ${error.message}`);
+            teacherEventExists = false; // 验证失败，认为不存在
+            needRecreate = true;
+            // 更新状态表，清除无效的事件ID
+            statusSheet.getRange(existingRecord.rowIndex, 8).setValue('');
+            existingRecord.teacherEventId = '';
+          }
+        } else if (hasTeacherEventId) {
+          // 有事件ID但没有日历ID，无法验证，需要重新创建
+          Logger.log(`[${sheetName}] 老师日历事件ID存在但缺少日历ID，将重新创建`);
+          needRecreate = true;
+          statusSheet.getRange(existingRecord.rowIndex, 8).setValue('');
+          existingRecord.teacherEventId = '';
+        }
+        
+        // 验证学生日历事件（只有当事件ID非空时才验证）
+        if (hasStudentEventId && existingRecord.studentCalendarId) {
+          try {
+            studentEventExists = verifyCalendarEventExists(existingRecord.studentCalendarId, existingRecord.studentEventId);
+            if (!studentEventExists) {
+              Logger.log(`[${sheetName}] 学生日历事件不存在（可能被删除）: ${existingRecord.studentEventId}，将重新创建`);
+              needRecreate = true;
+              // 更新状态表，清除无效的事件ID
+              statusSheet.getRange(existingRecord.rowIndex, 13).setValue(''); // 第13列是学生日历事件ID
+              existingRecord.studentEventId = '';
+            }
+          } catch (error) {
+            Logger.log(`[${sheetName}] 验证学生日历事件失败: ${existingRecord.studentEventId} - ${error.message}`);
+            studentEventExists = false; // 验证失败，认为不存在
+            needRecreate = true;
+            // 更新状态表，清除无效的事件ID
+            statusSheet.getRange(existingRecord.rowIndex, 13).setValue('');
+            existingRecord.studentEventId = '';
+          }
+        } else if (hasStudentEventId) {
+          // 有事件ID但没有日历ID，无法验证，需要重新创建
+          Logger.log(`[${sheetName}] 学生日历事件ID存在但缺少日历ID，将重新创建`);
+          needRecreate = true;
+          statusSheet.getRange(existingRecord.rowIndex, 13).setValue('');
+          existingRecord.studentEventId = '';
+        }
+        
+        // 如果两个事件都存在，才跳过处理
+        // 注意：如果只有部分事件ID，也需要处理（创建缺失的事件）
+        const hasValidTeacherEvent = hasTeacherEventId && existingRecord.teacherCalendarId && teacherEventExists;
+        const hasValidStudentEvent = hasStudentEventId && existingRecord.studentCalendarId && studentEventExists;
+        
+        if (hasValidTeacherEvent && hasValidStudentEvent) {
+          Logger.log(`[${sheetName}] 跳过处理（token相同且日历事件已验证存在）: ${course.lessonNumber}`);
+          return false;
+        }
+        
+        // 如果有事件不存在或需要重新创建，需要重新处理
+        if (needRecreate || !teacherEventExists || !studentEventExists) {
+          Logger.log(`[${sheetName}] 需要重新处理（日历事件不存在或需要创建）: ${course.lessonNumber}`);
+          return true;
+        }
       }
       
       // token相同但没有日历事件ID，可能是之前创建失败，需要重试
@@ -781,21 +857,31 @@ function processCourse(course, statusSheet) {
           course,
           existingInfo.teacherEventId
         );
-        result.teacherEmail.eventId = teacherEventId;
-        if (existingInfo.teacherEventId && existingInfo.hasChanges) {
-          Logger.log(`老师日历事件更新成功: ${teacherEventId}`);
-        } else if (existingInfo.teacherEventId) {
-          Logger.log(`老师日历事件保持不变: ${teacherEventId}`);
+        if (teacherEventId) {
+          result.teacherEmail.eventId = String(teacherEventId);
+          if (existingInfo.teacherEventId && existingInfo.hasChanges) {
+            Logger.log(`老师日历事件更新成功: ${teacherEventId}`);
+          } else if (existingInfo.teacherEventId) {
+            Logger.log(`老师日历事件保持不变: ${teacherEventId}`);
+          } else {
+            Logger.log(`老师日历事件创建成功: ${teacherEventId}`);
+          }
         } else {
-          Logger.log(`老师日历事件创建成功: ${teacherEventId}`);
+          result.teacherEmail.error = '创建事件成功但未返回事件ID';
+          Logger.log(`老师日历事件处理失败: 创建事件成功但未返回事件ID`);
         }
       } catch (error) {
         result.teacherEmail.error = error.message;
         Logger.log(`老师日历事件处理失败: ${error.message}`);
+        // 即使创建失败，也尝试保留已有的事件ID（如果有）
+        if (existingInfo.teacherEventId) {
+          result.teacherEmail.eventId = String(existingInfo.teacherEventId);
+          Logger.log(`保留已有老师日历事件ID: ${existingInfo.teacherEventId}`);
+        }
       }
     } else {
       // token相同且已有事件ID，跳过更新
-      result.teacherEmail.eventId = existingInfo.teacherEventId;
+      result.teacherEmail.eventId = existingInfo.teacherEventId ? String(existingInfo.teacherEventId) : null;
       Logger.log(`老师日历事件跳过（token相同且已有事件）: ${existingInfo.teacherEventId}`);
     }
     
@@ -826,29 +912,43 @@ function processCourse(course, statusSheet) {
           course,
           existingInfo.studentEventId
         );
-        result.studentEmail.eventId = studentEventId;
-        if (existingInfo.studentEventId && existingInfo.hasChanges) {
-          Logger.log(`学生日历事件更新成功: ${studentEventId}`);
-        } else if (existingInfo.studentEventId) {
-          Logger.log(`学生日历事件保持不变: ${studentEventId}`);
+        if (studentEventId) {
+          result.studentEmail.eventId = String(studentEventId);
+          if (existingInfo.studentEventId && existingInfo.hasChanges) {
+            Logger.log(`学生日历事件更新成功: ${studentEventId}`);
+          } else if (existingInfo.studentEventId) {
+            Logger.log(`学生日历事件保持不变: ${studentEventId}`);
+          } else {
+            Logger.log(`学生日历事件创建成功: ${studentEventId}`);
+          }
         } else {
-          Logger.log(`学生日历事件创建成功: ${studentEventId}`);
+          result.studentEmail.error = '创建事件成功但未返回事件ID';
+          Logger.log(`学生日历事件处理失败: 创建事件成功但未返回事件ID`);
         }
       } catch (error) {
         result.studentEmail.error = error.message;
         Logger.log(`学生日历事件处理失败: ${error.message}`);
+        // 即使创建失败，也尝试保留已有的事件ID（如果有）
+        if (existingInfo.studentEventId) {
+          result.studentEmail.eventId = String(existingInfo.studentEventId);
+          Logger.log(`保留已有学生日历事件ID: ${existingInfo.studentEventId}`);
+        }
       }
     } else {
       // token相同且已有事件ID，跳过更新
-      result.studentEmail.eventId = existingInfo.studentEventId;
+      result.studentEmail.eventId = existingInfo.studentEventId ? String(existingInfo.studentEventId) : null;
       Logger.log(`学生日历事件跳过（token相同且已有事件）: ${existingInfo.studentEventId}`);
     }
     
     // 5. 判断整体状态
     // 如果邮件跳过（因为token没变化），不应该影响成功判断
     // 只要日历事件创建成功，就算成功
-    const teacherSuccess = result.teacherEmail.eventId && !result.teacherEmail.error;
-    const studentSuccess = result.studentEmail.eventId && !result.studentEmail.error;
+    const teacherEventId = result.teacherEmail.eventId ? String(result.teacherEmail.eventId).trim() : '';
+    const studentEventId = result.studentEmail.eventId ? String(result.studentEmail.eventId).trim() : '';
+    const teacherSuccess = teacherEventId !== '' && !result.teacherEmail.error;
+    const studentSuccess = studentEventId !== '' && !result.studentEmail.error;
+    
+    Logger.log(`[${course.lessonNumber}] 状态判断: 老师事件ID=${teacherEventId || '无'}, 学生事件ID=${studentEventId || '无'}, 老师成功=${teacherSuccess}, 学生成功=${studentSuccess}`);
     
     if (teacherSuccess && studentSuccess) {
       result.status = '已完成';
@@ -857,6 +957,8 @@ function processCourse(course, statusSheet) {
     } else {
       result.status = '失败';
     }
+    
+    Logger.log(`[${course.lessonNumber}] 最终状态: ${result.status}`);
     
     // 6. 记录状态到隐藏sheet
     updateStatusRecord(statusSheet, course, result);
@@ -982,20 +1084,20 @@ function readProcessedStatus(statusSheet) {
       lessonNumber: row[1],
       date: row[2],
       token: row[3] || '', // Token（关键信息哈希）
-      teacherCalendarId: row[6] || '', // 老师日历ID（用于删除事件）
-      teacherEventId: row[7] || '', // 老师日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
-      studentCalendarId: row[11] || '', // 学生日历ID（用于删除事件）
-      studentEventId: row[12] || '', // 学生日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
+      teacherCalendarId: (row[6] && !(row[6] instanceof Date) && String(row[6]).trim()) || '', // 老师日历ID（用于删除事件）
+      teacherEventId: (row[7] && !(row[7] instanceof Date) && String(row[7]).trim()) || '', // 老师日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
+      studentCalendarId: (row[11] && !(row[11] instanceof Date) && String(row[11]).trim()) || '', // 学生日历ID（用于删除事件）
+      studentEventId: (row[12] && !(row[12] instanceof Date) && String(row[12]).trim()) || '', // 学生日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
       status: row[14] || row[12] || '', // 处理状态（向后兼容）
       rowIndex: i + 1 // 状态表的行号（从1开始，包含表头）
     };
     
     // 向后兼容：如果新格式没有事件ID，尝试从旧格式读取
-    if (!record.teacherEventId && row[5]) {
-      record.teacherEventId = row[5]; // 旧格式：老师日历事件ID在第5列
+    if (!record.teacherEventId && row[5] && !(row[5] instanceof Date) && String(row[5]).trim()) {
+      record.teacherEventId = String(row[5]).trim(); // 旧格式：老师日历事件ID在第5列
     }
-    if (!record.studentEventId && row[9]) {
-      record.studentEventId = row[9]; // 旧格式：学生日历事件ID在第9列
+    if (!record.studentEventId && row[9] && !(row[9] instanceof Date) && String(row[9]).trim()) {
+      record.studentEventId = String(row[9]).trim(); // 旧格式：学生日历事件ID在第9列
     }
     
     // 通过key索引（向后兼容）
@@ -1562,6 +1664,41 @@ function getCalendarByIdOrEmail(calendarId, course) {
 }
 
 /**
+ * 验证日历事件是否存在
+ * @param {string} calendarId - 日历ID
+ * @param {string} eventId - 事件ID
+ * @returns {boolean} 事件是否存在
+ */
+function verifyCalendarEventExists(calendarId, eventId) {
+  if (!calendarId || !eventId) {
+    return false;
+  }
+  
+  try {
+    // 使用更健壮的获取日历方法
+    const calendar = getCalendarByIdOrEmail(calendarId, null);
+    if (!calendar) {
+      Logger.log(`验证事件时找不到日历: ${calendarId}`);
+      return false;
+    }
+    
+    // 尝试获取事件
+    const event = calendar.getEventById(eventId);
+    if (event) {
+      Logger.log(`✓ 验证事件存在: ${eventId} (日历: ${calendarId})`);
+      return true;
+    } else {
+      Logger.log(`✗ 验证事件不存在: ${eventId} (日历: ${calendarId})`);
+      return false;
+    }
+  } catch (error) {
+    // 如果获取事件时抛出异常，通常表示事件不存在
+    Logger.log(`验证事件时出错: ${eventId} (日历: ${calendarId}) - ${error.message}`);
+    return false;
+  }
+}
+
+/**
  * 删除日历事件（通过日历ID和事件ID）
  */
 function deleteCalendarEvent(calendarId, eventId) {
@@ -1872,49 +2009,101 @@ function updateStatusRecord(statusSheet, course, result) {
   const recordId = course.recordId || (existingRecord ? (existingRecord[0] || generateRecordId()) : generateRecordId());
   
   // 保留已有的事件ID和日历ID（如果更新失败）
-  const teacherCalendarId = course.teacherCalendarId || (existingRecord ? (existingRecord[6] || '') : '');
-  const teacherEventId = result.teacherEmail.eventId || (existingRecord ? (existingRecord[7] || '') : '');
-  const studentCalendarId = course.studentCalendarId || (existingRecord ? (existingRecord[11] || '') : '');
-  const studentEventId = result.studentEmail.eventId || (existingRecord ? (existingRecord[12] || '') : '');
+  // 确保从 existingRecord 中读取的值是字符串
+  const existingTeacherCalendarId = existingRecord && existingRecord[6] ? String(existingRecord[6]).trim() : '';
+  const existingTeacherEventId = existingRecord && existingRecord[7] ? String(existingRecord[7]).trim() : '';
+  const existingStudentCalendarId = existingRecord && existingRecord[11] ? String(existingRecord[11]).trim() : '';
+  const existingStudentEventId = existingRecord && existingRecord[12] ? String(existingRecord[12]).trim() : '';
+  
+  const teacherCalendarId = course.teacherCalendarId || existingTeacherCalendarId || '';
+  // 确保事件ID是字符串格式，且不是日期对象
+  let teacherEventId = '';
+  if (result.teacherEmail.eventId) {
+    const eventId = result.teacherEmail.eventId;
+    // 检查是否是日期对象
+    if (eventId instanceof Date) {
+      Logger.log(`警告：老师事件ID是日期对象，将被忽略: ${eventId}`);
+      teacherEventId = existingTeacherEventId || '';
+    } else {
+      teacherEventId = String(eventId).trim();
+    }
+  } else {
+    teacherEventId = existingTeacherEventId || '';
+  }
+  
+  const studentCalendarId = course.studentCalendarId || existingStudentCalendarId || '';
+  // 确保事件ID是字符串格式，且不是日期对象
+  let studentEventId = '';
+  if (result.studentEmail.eventId) {
+    const eventId = result.studentEmail.eventId;
+    // 检查是否是日期对象
+    if (eventId instanceof Date) {
+      Logger.log(`警告：学生事件ID是日期对象，将被忽略: ${eventId}`);
+      studentEventId = existingStudentEventId || '';
+    } else {
+      studentEventId = String(eventId).trim();
+    }
+  } else {
+    studentEventId = existingStudentEventId || '';
+  }
   
   // 如果事件ID存在，更新创建时间；如果是新创建的，使用当前时间；如果是已有的，保留原时间
   let teacherEventTime = '';
   let studentEventTime = '';
   
-  if (result.teacherEmail.eventId) {
+  if (result.teacherEmail.eventId && !(result.teacherEmail.eventId instanceof Date)) {
     // 新创建或更新的事件
     teacherEventTime = nowStr;
-  } else if (existingRecord && existingRecord[7]) {
+  } else if (existingRecord && existingTeacherEventId) {
     // 保留原有的创建时间（向后兼容：尝试旧格式）
-    teacherEventTime = existingRecord[8] || existingRecord[6] || '';
+    const existingTime = existingRecord[8];
+    if (existingTime instanceof Date) {
+      // 如果是日期对象，格式化为字符串
+      const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+      teacherEventTime = Utilities.formatDate(existingTime, timezone, 'yyyy-MM-dd HH:mm:ss');
+    } else if (existingTime) {
+      teacherEventTime = String(existingTime).trim();
+    }
   }
   
-  if (result.studentEmail.eventId) {
+  if (result.studentEmail.eventId && !(result.studentEmail.eventId instanceof Date)) {
     // 新创建或更新的事件
     studentEventTime = nowStr;
-  } else if (existingRecord && existingRecord[12]) {
+  } else if (existingRecord && existingStudentEventId) {
     // 保留原有的创建时间（向后兼容：尝试旧格式）
-    studentEventTime = existingRecord[13] || existingRecord[10] || '';
+    const existingTime = existingRecord[13];
+    if (existingTime instanceof Date) {
+      // 如果是日期对象，格式化为字符串
+      const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+      studentEventTime = Utilities.formatDate(existingTime, timezone, 'yyyy-MM-dd HH:mm:ss');
+    } else if (existingTime) {
+      studentEventTime = String(existingTime).trim();
+    }
   }
   
   // 获取或计算token
   const token = course.token || calculateCourseToken(course);
   
+  // 格式化日期（确保是字符串格式）
+  const dateStr = course.date instanceof Date ? 
+    Utilities.formatDate(course.date, course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone(), 'yyyy-MM-dd') : 
+    String(course.date);
+  
   const record = [
     recordId, // 0 - 记录ID（唯一标识符）
     course.lessonNumber, // 1 - 课次（索引字段）
-    course.date, // 2 - 日期（索引字段）
+    dateStr, // 2 - 日期（索引字段，格式化为字符串）
     token, // 3 - Token（关键信息哈希值）
     result.teacherEmail.sent ? '已发送' : (result.teacherEmail.error || (existingRecord ? existingRecord[4] : '未发送')), // 4 - 老师邮件状态
     result.teacherEmail.sent ? nowStr : (existingRecord ? existingRecord[5] : ''), // 5 - 老师邮件发送时间
-    teacherCalendarId, // 6 - 老师日历ID（用于删除事件）
-    teacherEventId, // 7 - 老师日历事件ID（保留已有的）
-    teacherEventTime, // 8 - 老师日历创建/更新时间
+    String(teacherCalendarId || ''), // 6 - 老师日历ID（用于删除事件）
+    String(teacherEventId || ''), // 7 - 老师日历事件ID（保留已有的）
+    String(teacherEventTime || ''), // 8 - 老师日历创建/更新时间
     result.studentEmail.sent ? '已发送' : (result.studentEmail.error || (existingRecord ? existingRecord[9] : '未发送')), // 9 - 学生邮件状态
     result.studentEmail.sent ? nowStr : (existingRecord ? existingRecord[10] : ''), // 10 - 学生邮件发送时间
-    studentCalendarId, // 11 - 学生日历ID（用于删除事件）
-    studentEventId, // 12 - 学生日历事件ID（保留已有的）
-    studentEventTime, // 13 - 学生日历创建/更新时间
+    String(studentCalendarId || ''), // 11 - 学生日历ID（用于删除事件）
+    String(studentEventId || ''), // 12 - 学生日历事件ID（保留已有的）
+    String(studentEventTime || ''), // 13 - 学生日历创建/更新时间
     result.status, // 14 - 处理状态
     nowStr // 15 - 最后更新时间
   ];
