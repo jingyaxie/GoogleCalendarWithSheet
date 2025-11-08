@@ -1817,9 +1817,10 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
     throw new Error('日历ID为空');
   }
   
-  // 解析日期和时间
-  const startDateTime = parseDateTime(course.date, course.startTime);
-  const endDateTime = parseDateTime(course.date, course.endTime);
+  // 解析日期和时间（使用时区）
+  const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  const startDateTime = parseDateTime(course.date, course.startTime, timezone);
+  const endDateTime = parseDateTime(course.date, course.endTime, timezone);
   
   if (!startDateTime || !endDateTime) {
     throw new Error('日期时间解析失败');
@@ -2117,8 +2118,18 @@ function updateStatusRecord(statusSheet, course, result) {
 /**
  * 解析日期时间
  */
-function parseDateTime(dateInput, timeInput) {
+/**
+ * 解析日期时间
+ * @param {Date|string} dateInput - 日期输入
+ * @param {Date|string|number} timeInput - 时间输入
+ * @param {string} timezone - 时区（可选，默认使用脚本时区）
+ * @returns {Date} 解析后的日期时间对象
+ */
+function parseDateTime(dateInput, timeInput, timezone) {
   try {
+    // 获取时区（优先使用传入的时区，否则使用默认时区）
+    const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+    
     let date;
     let hours = 0;
     let minutes = 0;
@@ -2132,9 +2143,11 @@ function parseDateTime(dateInput, timeInput) {
       // 解析日期字符串：支持 2025/11/13 或 2025-11-13 格式
       if (dateInput.includes('/')) {
         const [year, month, day] = dateInput.split('/').map(Number);
-        date = new Date(year, month - 1, day);
+        // 使用指定时区创建日期
+        const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        date = new Date(dateStr + 'T00:00:00');
       } else if (dateInput.includes('-')) {
-        date = new Date(dateInput);
+        date = new Date(dateInput + 'T00:00:00');
       } else {
         throw new Error(`不支持的日期格式: ${dateInput}`);
       }
@@ -2164,13 +2177,55 @@ function parseDateTime(dateInput, timeInput) {
       throw new Error(`不支持的时间类型: ${typeof timeInput}`);
     }
     
-    // 设置时间
-    date.setHours(hours, minutes, seconds, 0);
+    // 设置时间（使用指定时区）
+    // 先构建日期时间字符串，然后使用时区解析
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hourStr = String(hours).padStart(2, '0');
+    const minuteStr = String(minutes).padStart(2, '0');
+    const secondStr = String(seconds).padStart(2, '0');
     
-    return date;
+    // 构建日期时间字符串（指定时区的本地时间）
+    const dateTimeStr = `${year}-${month}-${day} ${hourStr}:${minuteStr}:${secondStr}`;
+    
+    // 使用 Utilities.parseDate 来解析指定时区的日期时间字符串
+    // 这会返回一个 Date 对象，表示该时区的本地时间对应的 UTC 时间
+    const finalDate = Utilities.parseDate(dateTimeStr, tz, 'yyyy-MM-dd HH:mm:ss');
+    
+    Logger.log(`解析日期时间: ${dateInput} ${timeInput} (时区: ${tz}) -> ${finalDate.toISOString()}`);
+    
+    return finalDate;
   } catch (error) {
     Logger.log(`日期时间解析错误: ${dateInput} (${typeof dateInput}) ${timeInput} (${typeof timeInput}) - ${error.message}`);
     return null;
+  }
+}
+
+/**
+ * 获取时区偏移量（相对于 UTC，单位：分钟）
+ * @param {string} timezone - 时区标识符（如 Asia/Shanghai）
+ * @returns {number} 时区偏移量（分钟）
+ */
+function getTimezoneOffset(timezone) {
+  try {
+    const now = new Date();
+    // 使用 Utilities.formatDate 来获取指定时区的当前时间
+    const localTimeStr = Utilities.formatDate(now, timezone, 'yyyy-MM-dd HH:mm:ss');
+    const utcTimeStr = Utilities.formatDate(now, 'UTC', 'yyyy-MM-dd HH:mm:ss');
+    
+    // 解析时间字符串并计算差值
+    const localTime = new Date(localTimeStr.replace(' ', 'T'));
+    const utcTime = new Date(utcTimeStr.replace(' ', 'T'));
+    
+    // 计算偏移量（分钟）
+    const offset = (localTime.getTime() - utcTime.getTime()) / 60000;
+    
+    return offset;
+  } catch (error) {
+    Logger.log(`获取时区偏移量失败: ${timezone} - ${error.message}`);
+    // 如果失败，返回 0（UTC）
+    return 0;
   }
 }
 
