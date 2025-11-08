@@ -1133,38 +1133,86 @@ function readProcessedStatus(statusSheet) {
   const dataRange = statusSheet.getDataRange();
   const values = dataRange.getValues();
   
+  // 读取表头，建立表头名称到列索引的映射
+  const headers = values[0];
+  const headerMap = {};
+  headers.forEach((header, index) => {
+    const headerKey = String(header).trim().toLowerCase();
+    headerMap[headerKey] = index;
+  });
+  
+  // 定义表头名称的多种变体（支持中英文）
+  const getColumnIndex = (headerNames) => {
+    for (const name of headerNames) {
+      const key = name.toLowerCase();
+      if (headerMap[key] !== undefined) {
+        return headerMap[key];
+      }
+    }
+    return undefined;
+  };
+  
+  // 获取各列的索引（使用表头名称而不是固定索引）
+  const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
+  const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
+  const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
+  const tokenCol = getColumnIndex(['token', '令牌', '哈希']);
+  const teacherEmailStatusCol = getColumnIndex(['老师邮件状态', 'teacher email status', '老师邮件']);
+  const teacherEmailTimeCol = getColumnIndex(['老师邮件发送时间', 'teacher email time', '老师邮件时间']);
+  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
+  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
+  const teacherEventTimeCol = getColumnIndex(['老师日历创建时间', 'teacher event time', '老师事件时间']);
+  const studentEmailStatusCol = getColumnIndex(['学生邮件状态', 'student email status', '学生邮件']);
+  const studentEmailTimeCol = getColumnIndex(['学生邮件发送时间', 'student email time', '学生邮件时间']);
+  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
+  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
+  const studentEventTimeCol = getColumnIndex(['学生日历创建时间', 'student event time', '学生事件时间']);
+  const statusCol = getColumnIndex(['处理状态', 'status', '状态']);
+  const lastUpdateTimeCol = getColumnIndex(['最后更新时间', 'last update time', '更新时间']);
+  
   // 从第2行开始读取（第1行为表头）
-  // 列索引：0=记录ID, 1=课次, 2=日期, 3=Token, 6=老师日历ID, 7=老师日历事件ID, 11=学生日历ID, 12=学生日历事件ID, 14=处理状态
   // 状态表的第i行对应正式表的第i行（都有表头）
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
+    
+    // 使用表头映射获取值
+    const getValue = (colIndex) => {
+      if (colIndex === undefined) return '';
+      return row[colIndex] || '';
+    };
+    
     // 如果课次和日期都为空，跳过（空行）
-    if (!row[1] && !row[2]) {
+    const lessonNumber = getValue(lessonNumberCol);
+    const date = getValue(dateCol);
+    if (!lessonNumber && !date) {
       continue;
     }
     
-    const recordId = row[0] || ''; // 记录ID
-    const key = `${row[1]}_${row[2]}`; // 课次_日期（向后兼容）
+    const recordId = getValue(recordIdCol);
+    const key = `${lessonNumber}_${date}`; // 课次_日期（向后兼容）
     
     const record = {
       recordId: recordId, // 记录ID
-      lessonNumber: row[1],
-      date: row[2],
-      token: row[3] || '', // Token（关键信息哈希）
-      teacherCalendarId: (row[6] && !(row[6] instanceof Date) && String(row[6]).trim()) || '', // 老师日历ID（用于删除事件）
-      teacherEventId: (row[7] && !(row[7] instanceof Date) && String(row[7]).trim()) || '', // 老师日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
-      studentCalendarId: (row[11] && !(row[11] instanceof Date) && String(row[11]).trim()) || '', // 学生日历ID（用于删除事件）
-      studentEventId: (row[12] && !(row[12] instanceof Date) && String(row[12]).trim()) || '', // 学生日历事件ID（向后兼容：如果新格式没有，尝试旧格式）
-      status: row[14] || row[12] || '', // 处理状态（向后兼容）
+      lessonNumber: lessonNumber,
+      date: date,
+      token: getValue(tokenCol), // Token（关键信息哈希）
+      teacherCalendarId: (getValue(teacherCalendarIdCol) && !(getValue(teacherCalendarIdCol) instanceof Date) && String(getValue(teacherCalendarIdCol)).trim()) || '', // 老师日历ID（用于删除事件）
+      teacherEventId: (getValue(teacherEventIdCol) && !(getValue(teacherEventIdCol) instanceof Date) && String(getValue(teacherEventIdCol)).trim()) || '', // 老师日历事件ID
+      studentCalendarId: (getValue(studentCalendarIdCol) && !(getValue(studentCalendarIdCol) instanceof Date) && String(getValue(studentCalendarIdCol)).trim()) || '', // 学生日历ID（用于删除事件）
+      studentEventId: (getValue(studentEventIdCol) && !(getValue(studentEventIdCol) instanceof Date) && String(getValue(studentEventIdCol)).trim()) || '', // 学生日历事件ID
+      status: getValue(statusCol), // 处理状态
       rowIndex: i + 1 // 状态表的行号（从1开始，包含表头）
     };
     
-    // 向后兼容：如果新格式没有事件ID，尝试从旧格式读取
-    if (!record.teacherEventId && row[5] && !(row[5] instanceof Date) && String(row[5]).trim()) {
-      record.teacherEventId = String(row[5]).trim(); // 旧格式：老师日历事件ID在第5列
+    // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
+    const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
+    if (record.teacherEventId && invalidStatusTexts.includes(record.teacherEventId)) {
+      Logger.log(`警告：老师事件ID包含状态文本，将被清空: "${record.teacherEventId}"`);
+      record.teacherEventId = '';
     }
-    if (!record.studentEventId && row[9] && !(row[9] instanceof Date) && String(row[9]).trim()) {
-      record.studentEventId = String(row[9]).trim(); // 旧格式：学生日历事件ID在第9列
+    if (record.studentEventId && invalidStatusTexts.includes(record.studentEventId)) {
+      Logger.log(`警告：学生事件ID包含状态文本，将被清空: "${record.studentEventId}"`);
+      record.studentEventId = '';
     }
     
     // 通过key索引（向后兼容）
@@ -1605,15 +1653,48 @@ function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, ti
   const dataRange = statusSheet.getDataRange();
   const values = dataRange.getValues();
   
+  // 读取表头，建立表头名称到列索引的映射
+  const headers = values[0];
+  const headerMap = {};
+  headers.forEach((header, index) => {
+    const headerKey = String(header).trim().toLowerCase();
+    headerMap[headerKey] = index;
+  });
+  
+  // 定义表头名称的多种变体（支持中英文）
+  const getColumnIndex = (headerNames) => {
+    for (const name of headerNames) {
+      const key = name.toLowerCase();
+      if (headerMap[key] !== undefined) {
+        return headerMap[key];
+      }
+    }
+    return undefined;
+  };
+  
+  // 获取各列的索引（使用表头名称而不是固定索引）
+  const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
+  const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
+  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
+  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
+  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
+  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
+  
   // 标准化当前日期用于比较
   const currentDateStr = currentDate instanceof Date ?
     Utilities.formatDate(currentDate, tz, 'yyyy-MM-dd') :
     String(currentDate);
   
+  // 使用表头映射获取值
+  const getValue = (row, colIndex) => {
+    if (colIndex === undefined) return '';
+    return row[colIndex] || '';
+  };
+  
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const rowLessonNumber = row[1]; // 课次在第1列（索引1）
-    const rowDate = row[2]; // 日期在第2列（索引2）
+    const rowLessonNumber = getValue(row, lessonNumberCol);
+    const rowDate = getValue(row, dateCol);
     
     // 如果课次相同但日期不同
     if (rowLessonNumber === lessonNumber && rowDate) {
@@ -1625,20 +1706,12 @@ function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, ti
         oldRecords.push({
           lessonNumber: rowLessonNumber,
           date: rowDate,
-          teacherCalendarId: row[6] || '', // 老师日历ID在第6列
-          teacherEventId: row[7] || '', // 老师日历事件ID在第7列（向后兼容：尝试旧格式）
-          studentCalendarId: row[11] || '', // 学生日历ID在第11列
-          studentEventId: row[12] || '', // 学生日历事件ID在第12列（向后兼容：尝试旧格式）
+          teacherCalendarId: getValue(row, teacherCalendarIdCol),
+          teacherEventId: getValue(row, teacherEventIdCol),
+          studentCalendarId: getValue(row, studentCalendarIdCol),
+          studentEventId: getValue(row, studentEventIdCol),
           rowIndex: i + 1
         });
-        
-        // 向后兼容：如果新格式没有事件ID，尝试从旧格式读取
-        if (!oldRecords[oldRecords.length - 1].teacherEventId && row[5]) {
-          oldRecords[oldRecords.length - 1].teacherEventId = row[5]; // 旧格式：老师日历事件ID在第5列
-        }
-        if (!oldRecords[oldRecords.length - 1].studentEventId && row[9]) {
-          oldRecords[oldRecords.length - 1].studentEventId = row[9]; // 旧格式：学生日历事件ID在第9列
-        }
       }
     }
   }
@@ -2278,27 +2351,89 @@ function updateStatusRecord(statusSheet, course, result) {
   // 状态表的第i行对应正式表的第i+1行（正式表有表头，状态表也有表头）
   const rowIndex = course.rowIndex; // course.rowIndex是正式表的行号（从1开始，包含表头）
   
+  // 读取表头，建立表头名称到列索引的映射
+  const headerRow = statusSheet.getRange(1, 1, 1, statusSheet.getLastColumn()).getValues()[0];
+  const headerMap = {};
+  headerRow.forEach((header, index) => {
+    const headerKey = String(header).trim().toLowerCase();
+    headerMap[headerKey] = index;
+  });
+  
+  // 定义表头名称的多种变体（支持中英文）
+  const getColumnIndex = (headerNames) => {
+    for (const name of headerNames) {
+      const key = name.toLowerCase();
+      if (headerMap[key] !== undefined) {
+        return headerMap[key];
+      }
+    }
+    return undefined;
+  };
+  
+  // 获取各列的索引（使用表头名称而不是固定索引）
+  const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
+  const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
+  const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
+  const tokenCol = getColumnIndex(['token', '令牌', '哈希']);
+  const teacherEmailStatusCol = getColumnIndex(['老师邮件状态', 'teacher email status', '老师邮件']);
+  const teacherEmailTimeCol = getColumnIndex(['老师邮件发送时间', 'teacher email time', '老师邮件时间']);
+  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
+  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
+  const teacherEventTimeCol = getColumnIndex(['老师日历创建时间', 'teacher event time', '老师事件时间']);
+  const studentEmailStatusCol = getColumnIndex(['学生邮件状态', 'student email status', '学生邮件']);
+  const studentEmailTimeCol = getColumnIndex(['学生邮件发送时间', 'student email time', '学生邮件时间']);
+  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
+  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
+  const studentEventTimeCol = getColumnIndex(['学生日历创建时间', 'student event time', '学生事件时间']);
+  const statusCol = getColumnIndex(['处理状态', 'status', '状态']);
+  const lastUpdateTimeCol = getColumnIndex(['最后更新时间', 'last update time', '更新时间']);
+  
   // 读取当前行的现有记录（如果有）
   let existingRecord = null;
   if (rowIndex <= statusSheet.getLastRow()) {
-    const rowValues = statusSheet.getRange(rowIndex, 1, 1, 16).getValues()[0];
-    if (rowValues[1] || rowValues[2]) { // 如果课次或日期不为空，说明有记录
-      existingRecord = rowValues;
+    const rowValues = statusSheet.getRange(rowIndex, 1, 1, statusSheet.getLastColumn()).getValues()[0];
+    // 使用表头映射获取值
+    const getValue = (colIndex) => {
+      if (colIndex === undefined) return '';
+      return rowValues[colIndex] || '';
+    };
+    // 如果课次或日期不为空，说明有记录
+    if (getValue(lessonNumberCol) || getValue(dateCol)) {
+      existingRecord = { rowValues, getValue };
     }
   }
   
   // 获取或生成记录ID
-  const recordId = course.recordId || (existingRecord ? (existingRecord[0] || generateRecordId()) : generateRecordId());
+  const getExistingValue = (colIndex) => {
+    if (!existingRecord || colIndex === undefined) return '';
+    return existingRecord.getValue(colIndex);
+  };
+  const recordId = course.recordId || (existingRecord ? (getExistingValue(recordIdCol) || generateRecordId()) : generateRecordId());
   
   // 保留已有的事件ID和日历ID（如果更新失败）
   // 确保从 existingRecord 中读取的值是字符串
-  const existingTeacherCalendarId = existingRecord && existingRecord[6] ? String(existingRecord[6]).trim() : '';
-  const existingTeacherEventId = existingRecord && existingRecord[7] ? String(existingRecord[7]).trim() : '';
-  const existingStudentCalendarId = existingRecord && existingRecord[11] ? String(existingRecord[11]).trim() : '';
-  const existingStudentEventId = existingRecord && existingRecord[12] ? String(existingRecord[12]).trim() : '';
+  let existingTeacherCalendarId = getExistingValue(teacherCalendarIdCol);
+  existingTeacherCalendarId = existingTeacherCalendarId && !(existingTeacherCalendarId instanceof Date) ? String(existingTeacherCalendarId).trim() : '';
+  let existingTeacherEventId = getExistingValue(teacherEventIdCol);
+  existingTeacherEventId = existingTeacherEventId && !(existingTeacherEventId instanceof Date) ? String(existingTeacherEventId).trim() : '';
+  let existingStudentCalendarId = getExistingValue(studentCalendarIdCol);
+  existingStudentCalendarId = existingStudentCalendarId && !(existingStudentCalendarId instanceof Date) ? String(existingStudentCalendarId).trim() : '';
+  let existingStudentEventId = getExistingValue(studentEventIdCol);
+  existingStudentEventId = existingStudentEventId && !(existingStudentEventId instanceof Date) ? String(existingStudentEventId).trim() : '';
+  
+  // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
+  const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
+  if (existingTeacherEventId && invalidStatusTexts.includes(existingTeacherEventId)) {
+    Logger.log(`警告：老师事件ID包含状态文本，将被清空: "${existingTeacherEventId}"`);
+    existingTeacherEventId = '';
+  }
+  if (existingStudentEventId && invalidStatusTexts.includes(existingStudentEventId)) {
+    Logger.log(`警告：学生事件ID包含状态文本，将被清空: "${existingStudentEventId}"`);
+    existingStudentEventId = '';
+  }
   
   const teacherCalendarId = course.teacherCalendarId || existingTeacherCalendarId || '';
-  // 确保事件ID是字符串格式，且不是日期对象
+  // 确保事件ID是字符串格式，且不是日期对象或状态文本
   let teacherEventId = '';
   if (result.teacherEmail.eventId) {
     const eventId = result.teacherEmail.eventId;
@@ -2307,14 +2442,22 @@ function updateStatusRecord(statusSheet, course, result) {
       Logger.log(`警告：老师事件ID是日期对象，将被忽略: ${eventId}`);
       teacherEventId = existingTeacherEventId || '';
     } else {
-      teacherEventId = String(eventId).trim();
+      const eventIdStr = String(eventId).trim();
+      // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
+      const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
+      if (invalidStatusTexts.includes(eventIdStr)) {
+        Logger.log(`警告：老师事件ID包含状态文本，将被忽略: "${eventIdStr}"`);
+        teacherEventId = existingTeacherEventId || '';
+      } else {
+        teacherEventId = eventIdStr;
+      }
     }
   } else {
     teacherEventId = existingTeacherEventId || '';
   }
   
   const studentCalendarId = course.studentCalendarId || existingStudentCalendarId || '';
-  // 确保事件ID是字符串格式，且不是日期对象
+  // 确保事件ID是字符串格式，且不是日期对象或状态文本
   let studentEventId = '';
   if (result.studentEmail.eventId) {
     const eventId = result.studentEmail.eventId;
@@ -2323,7 +2466,15 @@ function updateStatusRecord(statusSheet, course, result) {
       Logger.log(`警告：学生事件ID是日期对象，将被忽略: ${eventId}`);
       studentEventId = existingStudentEventId || '';
     } else {
-      studentEventId = String(eventId).trim();
+      const eventIdStr = String(eventId).trim();
+      // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
+      const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
+      if (invalidStatusTexts.includes(eventIdStr)) {
+        Logger.log(`警告：学生事件ID包含状态文本，将被忽略: "${eventIdStr}"`);
+        studentEventId = existingStudentEventId || '';
+      } else {
+        studentEventId = eventIdStr;
+      }
     }
   } else {
     studentEventId = existingStudentEventId || '';
@@ -2337,8 +2488,8 @@ function updateStatusRecord(statusSheet, course, result) {
     // 新创建或更新的事件
     teacherEventTime = nowStr;
   } else if (existingRecord && existingTeacherEventId) {
-    // 保留原有的创建时间（向后兼容：尝试旧格式）
-    const existingTime = existingRecord[8];
+    // 保留原有的创建时间
+    const existingTime = getExistingValue(teacherEventTimeCol);
     if (existingTime instanceof Date) {
       // 如果是日期对象，格式化为字符串
       const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
@@ -2352,8 +2503,8 @@ function updateStatusRecord(statusSheet, course, result) {
     // 新创建或更新的事件
     studentEventTime = nowStr;
   } else if (existingRecord && existingStudentEventId) {
-    // 保留原有的创建时间（向后兼容：尝试旧格式）
-    const existingTime = existingRecord[13];
+    // 保留原有的创建时间
+    const existingTime = getExistingValue(studentEventTimeCol);
     if (existingTime instanceof Date) {
       // 如果是日期对象，格式化为字符串
       const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
@@ -2371,27 +2522,50 @@ function updateStatusRecord(statusSheet, course, result) {
     Utilities.formatDate(course.date, course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone(), 'yyyy-MM-dd') : 
     String(course.date);
   
-  const record = [
-    recordId, // 0 - 记录ID（唯一标识符）
-    course.lessonNumber, // 1 - 课次（索引字段）
-    dateStr, // 2 - 日期（索引字段，格式化为字符串）
-    token, // 3 - Token（关键信息哈希值）
-    result.teacherEmail.sent ? '已发送' : (result.teacherEmail.error || (existingRecord ? existingRecord[4] : '未发送')), // 4 - 老师邮件状态
-    result.teacherEmail.sent ? nowStr : (existingRecord ? existingRecord[5] : ''), // 5 - 老师邮件发送时间
-    String(teacherCalendarId || ''), // 6 - 老师日历ID（用于删除事件）
-    String(teacherEventId || ''), // 7 - 老师日历事件ID（保留已有的）
-    String(teacherEventTime || ''), // 8 - 老师日历创建/更新时间
-    result.studentEmail.sent ? '已发送' : (result.studentEmail.error || (existingRecord ? existingRecord[9] : '未发送')), // 9 - 学生邮件状态
-    result.studentEmail.sent ? nowStr : (existingRecord ? existingRecord[10] : ''), // 10 - 学生邮件发送时间
-    String(studentCalendarId || ''), // 11 - 学生日历ID（用于删除事件）
-    String(studentEventId || ''), // 12 - 学生日历事件ID（保留已有的）
-    String(studentEventTime || ''), // 13 - 学生日历创建/更新时间
-    result.status, // 14 - 处理状态
-    nowStr // 15 - 最后更新时间
+  // 使用表头映射来写入数据，而不是固定的列索引
+  // 获取所有列索引，确保列存在
+  const allColumns = [
+    recordIdCol, lessonNumberCol, dateCol, tokenCol,
+    teacherEmailStatusCol, teacherEmailTimeCol, teacherCalendarIdCol, teacherEventIdCol, teacherEventTimeCol,
+    studentEmailStatusCol, studentEmailTimeCol, studentCalendarIdCol, studentEventIdCol, studentEventTimeCol,
+    statusCol, lastUpdateTimeCol
   ];
   
+  // 找到最大列索引，确定需要写入的列数
+  const maxColIndex = Math.max(...allColumns.filter(col => col !== undefined));
+  const totalCols = maxColIndex + 1;
+  
+  // 创建一行数据数组，初始化为空字符串
+  const rowData = new Array(totalCols).fill('');
+  
+  // 根据表头映射写入数据
+  if (recordIdCol !== undefined) rowData[recordIdCol] = recordId;
+  if (lessonNumberCol !== undefined) rowData[lessonNumberCol] = course.lessonNumber;
+  if (dateCol !== undefined) rowData[dateCol] = dateStr;
+  if (tokenCol !== undefined) rowData[tokenCol] = token;
+  if (teacherEmailStatusCol !== undefined) {
+    rowData[teacherEmailStatusCol] = result.teacherEmail.sent ? '已发送' : (result.teacherEmail.error || (existingRecord ? getExistingValue(teacherEmailStatusCol) : '未发送'));
+  }
+  if (teacherEmailTimeCol !== undefined) {
+    rowData[teacherEmailTimeCol] = result.teacherEmail.sent ? nowStr : (existingRecord ? getExistingValue(teacherEmailTimeCol) : '');
+  }
+  if (teacherCalendarIdCol !== undefined) rowData[teacherCalendarIdCol] = String(teacherCalendarId || '');
+  if (teacherEventIdCol !== undefined) rowData[teacherEventIdCol] = String(teacherEventId || '');
+  if (teacherEventTimeCol !== undefined) rowData[teacherEventTimeCol] = String(teacherEventTime || '');
+  if (studentEmailStatusCol !== undefined) {
+    rowData[studentEmailStatusCol] = result.studentEmail.sent ? '已发送' : (result.studentEmail.error || (existingRecord ? getExistingValue(studentEmailStatusCol) : '未发送'));
+  }
+  if (studentEmailTimeCol !== undefined) {
+    rowData[studentEmailTimeCol] = result.studentEmail.sent ? nowStr : (existingRecord ? getExistingValue(studentEmailTimeCol) : '');
+  }
+  if (studentCalendarIdCol !== undefined) rowData[studentCalendarIdCol] = String(studentCalendarId || '');
+  if (studentEventIdCol !== undefined) rowData[studentEventIdCol] = String(studentEventId || '');
+  if (studentEventTimeCol !== undefined) rowData[studentEventTimeCol] = String(studentEventTime || '');
+  if (statusCol !== undefined) rowData[statusCol] = result.status;
+  if (lastUpdateTimeCol !== undefined) rowData[lastUpdateTimeCol] = nowStr;
+  
   // 直接更新对应行（状态表和正式表一一对应）
-  statusSheet.getRange(rowIndex, 1, 1, record.length).setValues([record]);
+  statusSheet.getRange(rowIndex, 1, 1, totalCols).setValues([rowData]);
 }
 
 // ==================== 工具函数 ====================
