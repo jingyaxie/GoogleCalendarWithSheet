@@ -376,11 +376,12 @@ function processSheet(spreadsheet, sheetName, config) {
     
     // 读取课程数据，传入配置信息（包含时区）
     const courses = readCourseData(mainSheet, config);
-    // 为每条课程记录添加时区信息
+    // 为每条课程记录添加时区和提醒时间信息
     courses.forEach(course => {
       course.timezone = config.timezone;
+      course.reminderMinutes = config.reminderMinutes;
     });
-    Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录，时区: ${config.timezone}`);
+    Logger.log(`[${sheetName}] 读取到 ${courses.length} 条课程记录，时区: ${config.timezone}, 提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
     
     // 读取已处理状态（在同步之前读取，以便检测被删除的记录）
     const statusSheet = spreadsheet.getSheetByName(statusSheetName);
@@ -696,6 +697,15 @@ function readSheetConfig(spreadsheet) {
                          headerMap['time zone'] ||
                          headerMap['tz'];
   
+  const reminderMinutesHeader = headerMap['提醒时间'] || 
+                                headerMap['reminder minutes'] || 
+                                headerMap['reminder'] ||
+                                headerMap['提醒'] ||
+                                headerMap['邮件提醒'] ||
+                                headerMap['email reminder'] ||
+                                headerMap['提前提醒'] ||
+                                headerMap['minutes before'];
+  
   Logger.log(`Sheet名称列索引: ${sheetNameHeader !== undefined ? sheetNameHeader : '未找到'}`);
   Logger.log(`启用状态列索引: ${enabledHeader !== undefined ? enabledHeader : '未找到'}`);
   Logger.log(`老师日历授权ID列索引: ${teacherCalendarIdHeader !== undefined ? teacherCalendarIdHeader : '未找到'}`);
@@ -703,6 +713,7 @@ function readSheetConfig(spreadsheet) {
   Logger.log(`老师邮箱列索引: ${teacherEmailHeader !== undefined ? teacherEmailHeader : '未找到'}`);
   Logger.log(`学生邮箱列索引: ${studentEmailHeader !== undefined ? studentEmailHeader : '未找到'}`);
   Logger.log(`时区列索引: ${timezoneHeader !== undefined ? timezoneHeader : '未找到'}`);
+  Logger.log(`提醒时间列索引: ${reminderMinutesHeader !== undefined ? reminderMinutesHeader : '未找到'}`);
   
   if (sheetNameHeader === undefined) {
     const availableHeaders = Object.keys(headerMap).join(', ');
@@ -748,13 +759,32 @@ function readSheetConfig(spreadsheet) {
     }
     
     // 读取配置信息
+    // 确保提醒时间字段是字符串类型
+    let reminderMinutesStr = '';
+    if (reminderMinutesHeader !== undefined && row[reminderMinutesHeader] !== undefined && row[reminderMinutesHeader] !== null && row[reminderMinutesHeader] !== '') {
+      reminderMinutesStr = String(row[reminderMinutesHeader]).trim();
+    }
+    
+    let reminderMinutes = null;
+    
+    // 解析提醒时间（支持分钟数，如：30、60、120等）
+    if (reminderMinutesStr) {
+      const parsed = parseInt(reminderMinutesStr, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        reminderMinutes = parsed;
+      } else {
+        Logger.log(`  警告：提醒时间格式不正确，将忽略: "${reminderMinutesStr}"`);
+      }
+    }
+    
     const config = {
       sheetName: sheetNameTrimmed,
       teacherCalendarId: teacherCalendarIdHeader !== undefined ? (row[teacherCalendarIdHeader] || '').trim() : '',
       studentCalendarId: studentCalendarIdHeader !== undefined ? (row[studentCalendarIdHeader] || '').trim() : '',
       teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
       studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
-      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE
+      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE,
+      reminderMinutes: reminderMinutes
     };
     
     // 如果邮箱为空，尝试使用日历ID作为邮箱
@@ -774,6 +804,7 @@ function readSheetConfig(spreadsheet) {
     Logger.log(`    老师日历ID: ${config.teacherCalendarId}, 老师邮箱: ${config.teacherEmail}`);
     Logger.log(`    学生日历ID: ${config.studentCalendarId}, 学生邮箱: ${config.studentEmail}`);
     Logger.log(`    时区: ${config.timezone}`);
+    Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
     
     sheetConfigMap.set(sheetNameTrimmed, config);
   }
@@ -2087,6 +2118,28 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
       // 更新事件信息（带速率限制处理）
       updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests);
       
+      // 更新提醒（如果配置了提醒时间）
+      if (course.reminderMinutes && course.reminderMinutes > 0) {
+        try {
+          // 清除现有提醒
+          event.removeAllReminders();
+          // 添加新的提醒
+          event.addEmailReminder(course.reminderMinutes);
+          Logger.log(`更新邮件提醒: 提前 ${course.reminderMinutes} 分钟`);
+        } catch (error) {
+          Logger.log(`更新提醒失败: ${error.message}`);
+          // 提醒失败不影响事件更新，继续执行
+        }
+      } else {
+        // 如果没有配置提醒时间，清除现有提醒
+        try {
+          event.removeAllReminders();
+          Logger.log(`清除提醒（未配置提醒时间）`);
+        } catch (error) {
+          Logger.log(`清除提醒失败: ${error.message}`);
+        }
+      }
+      
       Logger.log(`更新日历事件: ${existingEventId}`);
       return existingEventId;
     } catch (error) {
@@ -2108,6 +2161,17 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
       sendInvites: true
     }
   );
+  
+  // 添加提醒（如果配置了提醒时间）
+  if (course.reminderMinutes && course.reminderMinutes > 0) {
+    try {
+      event.addEmailReminder(course.reminderMinutes);
+      Logger.log(`添加邮件提醒: 提前 ${course.reminderMinutes} 分钟`);
+    } catch (error) {
+      Logger.log(`添加提醒失败: ${error.message}`);
+      // 提醒失败不影响事件创建，继续执行
+    }
+  }
   
   Logger.log(`创建新日历事件: ${event.getId()}`);
   return event.getId();

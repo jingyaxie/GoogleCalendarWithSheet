@@ -43,6 +43,7 @@
 - ✅ **删除处理**：自动删除已删除课程的日历事件并发送取消邮件
 - ✅ **事件验证**：自动验证日历事件是否存在，处理手动删除的情况
 - ✅ **时区支持**：支持为每个Sheet设置不同的时区
+- ✅ **邮件提醒**：支持配置提前多长时间通过邮件提醒上课
 
 ### 用户体验
 
@@ -60,9 +61,9 @@
 1. 在 Google 表格中创建一个名为 `_SheetConfig` 的 Sheet（配置表）
 2. 在配置表中设置表头和数据，格式如下：
 
-| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 |
-|-----------|----------|---------------|---------------|----------|----------|------|
-| 张三同学课程表 | 是 | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | Asia/Shanghai |
+| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 | 提醒时间 |
+|-----------|----------|---------------|---------------|----------|----------|------|----------|
+| 张三同学课程表 | 是 | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | jovixiao2022@gmail.com | jingyaxiegm1@gmail.com | Asia/Shanghai | 30 |
 
 **配置说明：**
 - **Sheet名称**：要处理的课程表名称（必须与实际的 Sheet 名称完全一致）
@@ -72,6 +73,7 @@
 - **老师邮箱**：老师的邮箱地址（用于发送邮件）
 - **学生邮箱**：学生的邮箱地址（用于发送邮件）
 - **时区**：可选，如果不填写，会使用默认时区 `Asia/Shanghai`
+- **提醒时间**：可选，提前多少分钟通过邮件提醒上课（单位：分钟），如：`30` 表示提前30分钟提醒，`60` 表示提前60分钟提醒。如果不配置或留空，创建事件时不会添加提醒
 
 ### 第二步：准备课程表
 
@@ -136,6 +138,12 @@
   - 支持的表头名称：`时区`、`Timezone`、`Time Zone`、`TZ`等
   - 如果不填写，会使用默认时区 `Asia/Shanghai`
   - 支持的时区格式请参考"时区设置"章节
+
+- **提醒时间**：可选，用于设置提前多长时间通过邮件提醒上课
+  - 支持的表头名称：`提醒时间`、`Reminder Minutes`、`Reminder`、`提醒`、`邮件提醒`、`Email Reminder`、`提前提醒`、`Minutes Before`等
+  - 填写提前提醒的分钟数，如：`30` 表示提前30分钟提醒，`60` 表示提前60分钟提醒
+  - 如果不配置或留空，创建事件时不会添加提醒
+  - 系统会在课程开始前指定的时间通过邮件提醒参与者
 
 **注意：**
 - 列的顺序可以随意调整，只要表头名称正确即可
@@ -357,11 +365,11 @@
 
 ### 配置示例
 
-| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 |
-|-----------|----------|---------------|---------------|----------|----------|------|
-| 中国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Asia/Shanghai |
-| 美国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | America/New_York |
-| 法国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Europe/Paris |
+| Sheet名称 | 启用状态 | 老师日历授权ID | 学生日历授权ID | 老师邮箱 | 学生邮箱 | 时区 | 提醒时间 |
+|-----------|----------|---------------|---------------|----------|----------|------|----------|
+| 中国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Asia/Shanghai | 30 |
+| 美国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | America/New_York | 60 |
+| 法国课程表 | 是 | teacher@example.com | student@example.com | teacher@example.com | student@example.com | Europe/Paris | 120 |
 
 ### 注意事项
 
@@ -478,6 +486,27 @@
   - 重新创建日历事件
 - 下次执行同步时会自动处理
 
+### Q13: 如何设置课程提醒？
+
+**A:** 
+- 在配置表 `_SheetConfig` 中添加"提醒时间"列
+- 填写提前提醒的分钟数，如：`30` 表示提前30分钟提醒，`60` 表示提前60分钟提醒
+- 系统会在课程开始前指定的时间通过邮件提醒参与者
+- 如果不配置或留空，创建事件时不会添加提醒
+- 支持的表头名称：`提醒时间`、`Reminder Minutes`、`Reminder`、`提醒`、`邮件提醒`等
+
+### Q14: 提醒时间可以设置哪些值？
+
+**A:** 
+- 提醒时间以分钟为单位，填写数字即可
+- 常见设置：
+  - `15`：提前15分钟提醒
+  - `30`：提前30分钟提醒
+  - `60`：提前1小时提醒
+  - `120`：提前2小时提醒
+  - `1440`：提前1天提醒
+- 建议根据课程时长和重要性设置合适的提醒时间
+
 ---
 
 ## ⚠️ 注意事项
@@ -565,6 +594,8 @@
 - ✅ 改进状态记录逻辑
 - ✅ 修复日期对象误写入事件ID的问题
 - ✅ 改进事件ID验证和格式化
+- ✅ 添加速率限制处理和重试机制
+- ✅ 支持配置提醒时间，自动添加邮件提醒
 
 ### 版本 1.0
 
