@@ -1,11 +1,21 @@
 /**
- * Google Apps Script: 同步课程信息到日历并发送邮件
+ * Google Apps Script: 同步课程信息到日历
  * 
  * 功能：
  * 1. 从Google表格读取课程信息
- * 2. 发送邮件通知给老师和学生
- * 3. 创建日历事件到老师和学生的日历
+ * 2. 在组织者日历上创建事件，老师和学生作为受邀者
+ * 3. 系统自动发送邀请邮件给老师和学生（通过 Google Calendar 的邀请功能，无需主动发送）
  * 4. 在隐藏sheet中记录处理状态
+ * 
+ * 注意：
+ * - 创建事件时使用 sendInvites: true，Google Calendar 会自动发送邀请邮件给所有受邀者
+ * - 不需要主动发送邮件给老师和学生，系统会自动处理
+ * - 只有在取消课程时才会主动发送取消邮件
+ * 
+ * 架构设计：
+ * - 配置表（_SheetConfig）：管理要处理的Sheet列表和配置信息
+ * - 状态表（_StatusLog_{SheetName}）：记录每条课程的处理状态和事件ID
+ * - 主课程表：包含课程信息（课次、日期、课程内容、时间、老师、学生）
  */
 
 // ==================== 配置常量 ====================
@@ -32,30 +42,6 @@ const CONFIG = {
     RETRY_DELAY: 2000,
     // 速率限制错误的关键词
     RATE_LIMIT_KEYWORDS: ['too many', 'rate limit', 'quota', 'try again later']
-  },
-  
-  // 邮件模板
-  EMAIL_TEMPLATE: {
-    subject: '课程通知：{courseTitle}',
-    body: `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2 style="color: #4CAF50;">课程通知</h2>
-          <p>您好 {recipientName}，</p>
-          <p>这是一封关于即将到来的课程通知：</p>
-          <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <p><strong>课程主题：</strong>{courseTitle}</p>
-            <p><strong>日期：</strong>{courseDate}</p>
-            <p><strong>时间：</strong>{startTime} - {endTime}</p>
-            <p><strong>老师：</strong>{teacherName}</p>
-            <p><strong>学生：</strong>{studentName}</p>
-          </div>
-          <p>课程事件已添加到您的日历中，请及时查看。</p>
-          <p>如有任何问题，请及时联系。</p>
-          <p style="margin-top: 30px; color: #666; font-size: 12px;">此邮件由系统自动发送，请勿回复。</p>
-        </body>
-      </html>
-    `
   }
 };
 
@@ -86,7 +72,7 @@ function menuRunSync() {
     const ui = SpreadsheetApp.getUi();
     const response = ui.alert(
       '确认执行同步',
-      '这将处理所有配置的课程表，发送邮件并创建日历事件。\n\n是否继续？',
+      '这将处理所有配置的课程表，在组织者日历上创建事件并邀请老师和学生。\n\n是否继续？',
       ui.ButtonSet.YES_NO
     );
     
@@ -259,12 +245,13 @@ function menuAbout() {
   const html = HtmlService.createHtmlOutput(`
     <div style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6;">
       <h2 style="color: #4285F4;">📅 课程同步系统</h2>
-      <p><strong>版本：</strong>2.0</p>
+      <p><strong>版本：</strong>3.0（组织者模式）</p>
       <p><strong>功能：</strong></p>
       <ul>
         <li>从配置表读取多个课程表</li>
-        <li>自动发送邮件通知给老师和学生</li>
-        <li>创建日历事件到老师和学生的日历</li>
+        <li>在组织者日历上创建事件</li>
+        <li>自动邀请老师和学生（作为受邀者）</li>
+        <li>系统自动发送邀请邮件</li>
         <li>跟踪处理状态和记录ID</li>
         <li>支持课程更新和删除</li>
       </ul>
@@ -288,6 +275,7 @@ function menuAbout() {
  */
 function main() {
   try {
+    Logger.log('通知\t已开始执行');
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     
     // 从配置表读取要处理的 sheet 配置信息
@@ -344,27 +332,215 @@ function main() {
         totalFailed++;
       }
       totalProcessed += result.processed;
-      // 计算成功和失败的记录数
-      const recordsSuccess = result.processed - (result.failed || 0);
-      totalRecordsSuccess += recordsSuccess;
-      totalRecordsFailed += (result.failed || 0);
+      totalRecordsSuccess += (result.processed - result.failed);
+      totalRecordsFailed += result.failed;
       
-      Logger.log(`${result.sheetName}: ${sheetSuccess ? '成功' : '失败'} - 处理 ${result.processed} 条记录（成功 ${recordsSuccess}, 失败 ${result.failed || 0}）${result.error ? ` (错误: ${result.error})` : ''}`);
+      const status = sheetSuccess ? '成功' : '失败';
+      Logger.log(`${result.sheetName}: ${status} - 处理 ${result.processed} 条记录`);
     }
-    Logger.log(`总计: 成功 ${totalSuccess} 个 Sheet, 失败 ${totalFailed} 个 Sheet, 共处理 ${totalProcessed} 条记录（成功 ${totalRecordsSuccess}, 失败 ${totalRecordsFailed}）`);
+    
+    Logger.log(`\n=== 所有 Sheet 处理结果汇总 ===`);
+    Logger.log(`总计: 成功 ${totalRecordsSuccess}, 失败 ${totalRecordsFailed}, 共处理 ${totalProcessed} 条记录`);
+    
+    Logger.log('通知\t执行完毕');
     
   } catch (error) {
     Logger.log(`主函数执行失败: ${error.message}`);
+    Logger.log(`错误堆栈: ${error.stack}`);
     throw error;
   }
 }
 
 /**
- * 处理单个 Sheet 的所有课程记录
+ * 从配置表读取要处理的 Sheet 配置信息
  * @param {Spreadsheet} spreadsheet - 表格对象
- * @param {string} sheetName - Sheet 名称
- * @param {Object} config - Sheet 配置信息（包含邮箱和日历ID）
- * @returns {Object} 处理结果
+ * @returns {Map<string, Object>} Sheet 配置信息映射表，key为Sheet名称，value为配置对象
+ */
+function readSheetConfig(spreadsheet) {
+  // 先列出所有 sheet，用于调试
+  const allSheets = spreadsheet.getSheets();
+  const allSheetNames = allSheets.map(s => s.getName());
+  Logger.log(`当前表格中的所有 Sheet: ${allSheetNames.join(', ')}`);
+  Logger.log(`正在查找配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
+  
+  const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
+  
+  // 如果配置表不存在，直接报错
+  if (!configSheet) {
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 不存在，请先创建配置表`);
+  }
+  
+  Logger.log(`✓ 找到配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
+  
+  // 读取配置表数据
+  const dataRange = configSheet.getDataRange();
+  const values = dataRange.getValues();
+  
+  Logger.log(`配置表数据行数: ${values.length}`);
+  
+  if (values.length < 2) {
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 没有数据（只有表头），请至少添加一行数据`);
+  }
+  
+  // 解析表头
+  const headers = values[0];
+  Logger.log(`配置表表头: ${headers.join(', ')}`);
+  
+  const headerMap = {};
+  headers.forEach((header, index) => {
+    const normalizedHeader = String(header).trim().toLowerCase();
+    headerMap[normalizedHeader] = index;
+  });
+  
+  // 支持多种表头名称
+  const sheetNameHeader = headerMap['sheet名称'] || 
+                          headerMap['sheet name'] || 
+                          headerMap['名称'] ||
+                          headerMap['name'] ||
+                          headerMap['sheet'] ||
+                          headerMap['表名'];
+  
+  const enabledHeader = headerMap['启用状态'] || 
+                        headerMap['enabled'] || 
+                        headerMap['启用'] || 
+                        headerMap['状态'] || 
+                        headerMap['status'] || 
+                        headerMap['是否启用'] ||
+                        headerMap['enable'] ||
+                        headerMap['active'];
+  
+  // 组织者日历ID（必需）
+  const organizerCalendarIdHeader = headerMap['组织者日历id'] || 
+                                     headerMap['organizer calendar id'] || 
+                                     headerMap['组织者日历'] ||
+                                     headerMap['organizer calendar'] ||
+                                     headerMap['组织者日历授权id'] ||
+                                     headerMap['organizer calendar id'] ||
+                                     headerMap['管理员日历id'] ||
+                                     headerMap['admin calendar id'] ||
+                                     headerMap['管理员日历'] ||
+                                     headerMap['admin calendar'];
+  
+  const teacherEmailHeader = headerMap['老师邮箱'] || 
+                             headerMap['teacher email'] || 
+                             headerMap['老师email'] ||
+                             headerMap['teacheremail'] ||
+                             headerMap['老师邮件'];
+  
+  const studentEmailHeader = headerMap['学生邮箱'] || 
+                             headerMap['student email'] || 
+                             headerMap['学生email'] ||
+                             headerMap['studentemail'] ||
+                             headerMap['学生邮件'];
+  
+  const timezoneHeader = headerMap['时区'] || 
+                         headerMap['timezone'] || 
+                         headerMap['time zone'] ||
+                         headerMap['tz'];
+  
+  const reminderMinutesHeader = headerMap['提醒时间'] || 
+                                headerMap['reminder minutes'] || 
+                                headerMap['reminder'] ||
+                                headerMap['提醒'] ||
+                                headerMap['邮件提醒'] ||
+                                headerMap['email reminder'] ||
+                                headerMap['提前提醒'] ||
+                                headerMap['minutes before'];
+  
+  // 检查必需字段
+  if (sheetNameHeader === undefined) {
+    const availableHeaders = Object.keys(headerMap).join(', ');
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保包含 Sheet 名称的列，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
+  }
+  
+  if (organizerCalendarIdHeader === undefined) {
+    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"组织者日历ID"列。\n当前表头: ${headers.join(', ')}\n请确保包含组织者日历ID的列，支持的列名：组织者日历ID、Organizer Calendar ID、组织者日历、管理员日历ID等`);
+  }
+  
+  // 读取启用的 Sheet 配置信息
+  const sheetConfigMap = new Map();
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const sheetName = row[sheetNameHeader];
+    
+    // 跳过空行
+    if (!sheetName || String(sheetName).trim() === '') {
+      continue;
+    }
+    
+    const sheetNameTrimmed = String(sheetName).trim();
+    
+    // 检查启用状态
+    if (enabledHeader !== undefined) {
+      const enabled = row[enabledHeader];
+      const enabledStr = String(enabled).trim().toLowerCase();
+      // 支持多种表示方式：是/Yes/1/true/启用
+      if (enabledStr !== '是' && enabledStr !== 'yes' && enabledStr !== '1' && enabledStr !== 'true' && enabledStr !== '启用' && enabledStr !== 'enabled') {
+        Logger.log(`跳过未启用的 Sheet: ${sheetNameTrimmed}`);
+        continue;
+      }
+    }
+    
+    // 验证 Sheet 是否存在
+    const sheet = spreadsheet.getSheetByName(sheetNameTrimmed);
+    if (!sheet) {
+      Logger.log(`警告：配置的 Sheet "${sheetNameTrimmed}" 不存在，已跳过`);
+      continue;
+    }
+    
+    // 读取组织者日历ID（必需）
+    const organizerCalendarId = row[organizerCalendarIdHeader] ? String(row[organizerCalendarIdHeader]).trim() : '';
+    if (!organizerCalendarId) {
+      Logger.log(`警告：组织者日历ID为空，跳过 Sheet: ${sheetNameTrimmed}`);
+      continue;
+    }
+    
+    // 读取提醒时间
+    let reminderMinutesStr = '';
+    if (reminderMinutesHeader !== undefined && row[reminderMinutesHeader] !== undefined && row[reminderMinutesHeader] !== null && row[reminderMinutesHeader] !== '') {
+      reminderMinutesStr = String(row[reminderMinutesHeader]).trim();
+    }
+    
+    let reminderMinutes = null;
+    if (reminderMinutesStr) {
+      const parsed = parseInt(reminderMinutesStr, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        reminderMinutes = parsed;
+      }
+    }
+    
+    const config = {
+      sheetName: sheetNameTrimmed,
+      organizerCalendarId: organizerCalendarId,
+      teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
+      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
+      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE,
+      reminderMinutes: reminderMinutes
+    };
+    
+    // 如果时区为空，使用默认时区
+    if (!config.timezone) {
+      config.timezone = CONFIG.TIMEZONE;
+    }
+    
+    Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
+    Logger.log(`    组织者日历ID: ${config.organizerCalendarId}`);
+    Logger.log(`    老师邮箱: ${config.teacherEmail}`);
+    Logger.log(`    学生邮箱: ${config.studentEmail}`);
+    Logger.log(`    时区: ${config.timezone}`);
+    Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
+    
+    sheetConfigMap.set(sheetNameTrimmed, config);
+  }
+  
+  Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个启用的 Sheet 配置`);
+  return sheetConfigMap;
+}
+
+// ==================== 第三部分：课程数据处理和状态管理 ====================
+
+/**
+ * 处理单个 Sheet
  */
 function processSheet(spreadsheet, sheetName, config) {
   try {
@@ -402,7 +578,7 @@ function processSheet(spreadsheet, sheetName, config) {
       Logger.log(`[${sheetName}] 检测到 ${deletedRecords.length} 条被删除的记录，将取消课程`);
       for (const deletedRecord of deletedRecords) {
         try {
-          cancelCourse(deletedRecord, statusSheet);
+          cancelCourse(deletedRecord, statusSheet, config);
           Logger.log(`[${sheetName}] 取消课程成功: ${deletedRecord.lessonNumber} - ${deletedRecord.date}`);
         } catch (error) {
           Logger.log(`[${sheetName}] 取消课程失败: ${deletedRecord.lessonNumber} - ${error.message}`);
@@ -457,81 +633,48 @@ function processSheet(spreadsheet, sheetName, config) {
       // token相同，说明关键信息没有变化
       // 检查是否已有日历事件ID，如果有则验证事件是否真实存在
       // 注意：只有当事件ID非空字符串时才检查
-      const hasTeacherEventId = existingRecord.teacherEventId && String(existingRecord.teacherEventId).trim() !== '';
-      const hasStudentEventId = existingRecord.studentEventId && String(existingRecord.studentEventId).trim() !== '';
+      const hasOrganizerEventId = existingRecord.organizerEventId && String(existingRecord.organizerEventId).trim() !== '';
       
-      if (hasTeacherEventId || hasStudentEventId) {
+      if (hasOrganizerEventId) {
         // 验证事件是否真实存在于日历中
-        let teacherEventExists = false;
-        let studentEventExists = false;
+        let organizerEventExists = false;
         let needRecreate = false;
         
-        // 验证老师日历事件（只有当事件ID非空时才验证）
-        if (hasTeacherEventId && existingRecord.teacherCalendarId) {
+        // 验证组织者日历事件（只有当事件ID非空时才验证）
+        if (hasOrganizerEventId && existingRecord.organizerCalendarId) {
           try {
-            teacherEventExists = verifyCalendarEventExists(existingRecord.teacherCalendarId, existingRecord.teacherEventId);
-            if (!teacherEventExists) {
-              Logger.log(`[${sheetName}] 老师日历事件不存在（可能被删除）: ${existingRecord.teacherEventId}，将重新创建`);
+            organizerEventExists = verifyCalendarEventExists(existingRecord.organizerCalendarId, existingRecord.organizerEventId);
+            if (!organizerEventExists) {
+              Logger.log(`[${sheetName}] 组织者日历事件不存在（可能被删除）: ${existingRecord.organizerEventId}，将重新创建`);
               needRecreate = true;
               // 更新状态表，清除无效的事件ID
-              statusSheet.getRange(existingRecord.rowIndex, 8).setValue(''); // 第8列是老师日历事件ID
-              existingRecord.teacherEventId = '';
+              statusSheet.getRange(existingRecord.rowIndex, 6).setValue(''); // 第6列是组织者日历事件ID
+              existingRecord.organizerEventId = '';
             }
           } catch (error) {
-            Logger.log(`[${sheetName}] 验证老师日历事件失败: ${existingRecord.teacherEventId} - ${error.message}`);
-            teacherEventExists = false; // 验证失败，认为不存在
+            Logger.log(`[${sheetName}] 验证组织者日历事件失败: ${existingRecord.organizerEventId} - ${error.message}`);
+            organizerEventExists = false; // 验证失败，认为不存在
             needRecreate = true;
             // 更新状态表，清除无效的事件ID
-            statusSheet.getRange(existingRecord.rowIndex, 8).setValue('');
-            existingRecord.teacherEventId = '';
+            statusSheet.getRange(existingRecord.rowIndex, 6).setValue('');
+            existingRecord.organizerEventId = '';
           }
-        } else if (hasTeacherEventId) {
+        } else if (hasOrganizerEventId) {
           // 有事件ID但没有日历ID，无法验证，需要重新创建
-          Logger.log(`[${sheetName}] 老师日历事件ID存在但缺少日历ID，将重新创建`);
+          Logger.log(`[${sheetName}] 组织者日历事件ID存在但缺少日历ID，将重新创建`);
           needRecreate = true;
-          statusSheet.getRange(existingRecord.rowIndex, 8).setValue('');
-          existingRecord.teacherEventId = '';
+          statusSheet.getRange(existingRecord.rowIndex, 6).setValue('');
+          existingRecord.organizerEventId = '';
         }
         
-        // 验证学生日历事件（只有当事件ID非空时才验证）
-        if (hasStudentEventId && existingRecord.studentCalendarId) {
-          try {
-            studentEventExists = verifyCalendarEventExists(existingRecord.studentCalendarId, existingRecord.studentEventId);
-            if (!studentEventExists) {
-              Logger.log(`[${sheetName}] 学生日历事件不存在（可能被删除）: ${existingRecord.studentEventId}，将重新创建`);
-              needRecreate = true;
-              // 更新状态表，清除无效的事件ID
-              statusSheet.getRange(existingRecord.rowIndex, 13).setValue(''); // 第13列是学生日历事件ID
-              existingRecord.studentEventId = '';
-            }
-          } catch (error) {
-            Logger.log(`[${sheetName}] 验证学生日历事件失败: ${existingRecord.studentEventId} - ${error.message}`);
-            studentEventExists = false; // 验证失败，认为不存在
-            needRecreate = true;
-            // 更新状态表，清除无效的事件ID
-            statusSheet.getRange(existingRecord.rowIndex, 13).setValue('');
-            existingRecord.studentEventId = '';
-          }
-        } else if (hasStudentEventId) {
-          // 有事件ID但没有日历ID，无法验证，需要重新创建
-          Logger.log(`[${sheetName}] 学生日历事件ID存在但缺少日历ID，将重新创建`);
-          needRecreate = true;
-          statusSheet.getRange(existingRecord.rowIndex, 13).setValue('');
-          existingRecord.studentEventId = '';
-        }
-        
-        // 如果两个事件都存在，才跳过处理
-        // 注意：如果只有部分事件ID，也需要处理（创建缺失的事件）
-        const hasValidTeacherEvent = hasTeacherEventId && existingRecord.teacherCalendarId && teacherEventExists;
-        const hasValidStudentEvent = hasStudentEventId && existingRecord.studentCalendarId && studentEventExists;
-        
-        if (hasValidTeacherEvent && hasValidStudentEvent) {
+        // 如果事件存在，跳过处理
+        if (organizerEventExists) {
           Logger.log(`[${sheetName}] 跳过处理（token相同且日历事件已验证存在）: ${course.lessonNumber}`);
           return false;
         }
         
         // 如果有事件不存在或需要重新创建，需要重新处理
-        if (needRecreate || !teacherEventExists || !studentEventExists) {
+        if (needRecreate || !organizerEventExists) {
           Logger.log(`[${sheetName}] 需要重新处理（日历事件不存在或需要创建）: ${course.lessonNumber}`);
           return true;
         }
@@ -555,7 +698,7 @@ function processSheet(spreadsheet, sheetName, config) {
     for (let i = 0; i < toProcess.length; i++) {
       const course = toProcess[i];
       try {
-        const result = processCourse(course, statusSheet);
+        const result = processCourse(course, statusSheet, config);
         results.push(result);
         Logger.log(`[${sheetName}] 处理完成: ${course.lessonNumber} - ${result.status}`);
         
@@ -611,515 +754,7 @@ function processSheet(spreadsheet, sheetName, config) {
 }
 
 /**
- * 从配置表读取要处理的 Sheet 配置信息
- * @param {Spreadsheet} spreadsheet - 表格对象
- * @returns {Map<string, Object>} Sheet 配置信息映射表，key为Sheet名称，value为配置对象
- */
-function readSheetConfig(spreadsheet) {
-  // 先列出所有 sheet，用于调试
-  const allSheets = spreadsheet.getSheets();
-  const allSheetNames = allSheets.map(s => s.getName());
-  Logger.log(`当前表格中的所有 Sheet: ${allSheetNames.join(', ')}`);
-  Logger.log(`正在查找配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
-  
-  const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
-  
-  // 如果配置表不存在，直接报错
-  if (!configSheet) {
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 不存在，请先创建配置表`);
-  }
-  
-  Logger.log(`✓ 找到配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
-  
-  // 读取配置表数据
-  const dataRange = configSheet.getDataRange();
-  const values = dataRange.getValues();
-  
-  Logger.log(`配置表数据行数: ${values.length}`);
-  
-  if (values.length < 2) {
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 没有数据（只有表头），请至少添加一行数据`);
-  }
-  
-  // 解析表头，找到"Sheet名称"和"启用状态"列
-  const headers = values[0];
-  Logger.log(`配置表表头: ${headers.join(', ')}`);
-  
-  const headerMap = {};
-  headers.forEach((header, index) => {
-    const normalizedHeader = String(header).trim().toLowerCase();
-    headerMap[normalizedHeader] = index;
-    Logger.log(`  表头[${index}]: "${header}" -> 标准化: "${normalizedHeader}"`);
-  });
-  
-  // 支持多种表头名称（更灵活的匹配）
-  // 注意：headerMap 中的键都是小写的，所以查找时也要用小写
-  let sheetNameHeader = headerMap['sheet名称'] || 
-                        headerMap['sheet name'] || 
-                        headerMap['名称'] || 
-                        headerMap['name'] || 
-                        headerMap['sheet'] || 
-                        headerMap['表名'] ||
-                        headerMap['工作表名称'] ||
-                        headerMap['工作表'] ||
-                        headerMap['tab名称'] ||
-                        headerMap['tab name'];
-  
-  // 如果还没找到，尝试更宽松的匹配：遍历所有键，查找包含"sheet"或"名称"的键
-  if (sheetNameHeader === undefined) {
-    for (const key of Object.keys(headerMap)) {
-      if (key.includes('sheet') || key.includes('名称') || key === 'name' || key === '表名' || key.includes('工作表')) {
-        sheetNameHeader = headerMap[key];
-        Logger.log(`通过宽松匹配找到Sheet名称列: "${key}" (索引: ${sheetNameHeader})`);
-        break;
-      }
-    }
-  }
-  
-  const enabledHeader = headerMap['启用状态'] || 
-                        headerMap['enabled'] || 
-                        headerMap['启用'] || 
-                        headerMap['状态'] || 
-                        headerMap['status'] || 
-                        headerMap['是否启用'] ||
-                        headerMap['enable'] ||
-                        headerMap['active'];
-  
-  // 读取邮箱和日历ID列
-  const teacherCalendarIdHeader = headerMap['老师日历授权id'] || 
-                                   headerMap['teacher calendar id'] || 
-                                   headerMap['老师日历id'] ||
-                                   headerMap['teachercalendarid'] ||
-                                   headerMap['老师日历授权id'] ||
-                                   headerMap['teacher calendar id'];
-  
-  const studentCalendarIdHeader = headerMap['学生日历授权id'] || 
-                                   headerMap['student calendar id'] || 
-                                   headerMap['学生日历id'] ||
-                                   headerMap['studentcalendarid'] ||
-                                   headerMap['学生日历授权id'] ||
-                                   headerMap['student calendar id'];
-  
-  const teacherEmailHeader = headerMap['老师邮箱'] || 
-                             headerMap['teacher email'] || 
-                             headerMap['老师email'] ||
-                             headerMap['teacheremail'] ||
-                             headerMap['老师邮件'];
-  
-  const studentEmailHeader = headerMap['学生邮箱'] || 
-                             headerMap['student email'] || 
-                             headerMap['学生email'] ||
-                             headerMap['studentemail'] ||
-                             headerMap['学生邮件'];
-  
-  const timezoneHeader = headerMap['时区'] || 
-                         headerMap['timezone'] || 
-                         headerMap['time zone'] ||
-                         headerMap['tz'];
-  
-  const reminderMinutesHeader = headerMap['提醒时间'] || 
-                                headerMap['reminder minutes'] || 
-                                headerMap['reminder'] ||
-                                headerMap['提醒'] ||
-                                headerMap['邮件提醒'] ||
-                                headerMap['email reminder'] ||
-                                headerMap['提前提醒'] ||
-                                headerMap['minutes before'];
-  
-  Logger.log(`Sheet名称列索引: ${sheetNameHeader !== undefined ? sheetNameHeader : '未找到'}`);
-  Logger.log(`启用状态列索引: ${enabledHeader !== undefined ? enabledHeader : '未找到'}`);
-  Logger.log(`老师日历授权ID列索引: ${teacherCalendarIdHeader !== undefined ? teacherCalendarIdHeader : '未找到'}`);
-  Logger.log(`学生日历授权ID列索引: ${studentCalendarIdHeader !== undefined ? studentCalendarIdHeader : '未找到'}`);
-  Logger.log(`老师邮箱列索引: ${teacherEmailHeader !== undefined ? teacherEmailHeader : '未找到'}`);
-  Logger.log(`学生邮箱列索引: ${studentEmailHeader !== undefined ? studentEmailHeader : '未找到'}`);
-  Logger.log(`时区列索引: ${timezoneHeader !== undefined ? timezoneHeader : '未找到'}`);
-  Logger.log(`提醒时间列索引: ${reminderMinutesHeader !== undefined ? reminderMinutesHeader : '未找到'}`);
-  
-  if (sheetNameHeader === undefined) {
-    const availableHeaders = Object.keys(headerMap).join(', ');
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保包含 Sheet 名称的列，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
-  }
-  
-  // 读取启用的 Sheet 配置信息
-  const sheetConfigMap = new Map();
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const sheetName = row[sheetNameHeader];
-    
-    Logger.log(`读取第 ${i + 1} 行: Sheet名称="${sheetName}"`);
-    
-    // 跳过空行
-    if (!sheetName || String(sheetName).trim() === '') {
-      Logger.log(`  跳过空行`);
-      continue;
-    }
-    
-    const sheetNameTrimmed = String(sheetName).trim();
-    
-    // 检查启用状态（如果存在启用状态列）
-    if (enabledHeader !== undefined) {
-      const enabled = row[enabledHeader];
-      const enabledStr = String(enabled).trim().toLowerCase();
-      Logger.log(`  启用状态: "${enabled}" -> 标准化: "${enabledStr}"`);
-      // 支持多种表示方式：是/Yes/1/true/启用
-      if (enabledStr !== '是' && enabledStr !== 'yes' && enabledStr !== '1' && enabledStr !== 'true' && enabledStr !== '启用' && enabledStr !== 'enabled') {
-        Logger.log(`  跳过未启用的 Sheet: ${sheetNameTrimmed}`);
-        continue;
-      }
-    } else {
-      Logger.log(`  未找到启用状态列，默认启用`);
-    }
-    
-    // 验证 Sheet 是否存在
-    const sheet = spreadsheet.getSheetByName(sheetNameTrimmed);
-    if (!sheet) {
-      Logger.log(`  警告：配置的 Sheet "${sheetNameTrimmed}" 不存在，已跳过`);
-      Logger.log(`  当前所有 Sheet: ${allSheetNames.join(', ')}`);
-      continue;
-    }
-    
-    // 读取配置信息
-    // 确保提醒时间字段是字符串类型
-    let reminderMinutesStr = '';
-    if (reminderMinutesHeader !== undefined && row[reminderMinutesHeader] !== undefined && row[reminderMinutesHeader] !== null && row[reminderMinutesHeader] !== '') {
-      reminderMinutesStr = String(row[reminderMinutesHeader]).trim();
-    }
-    
-    let reminderMinutes = null;
-    
-    // 解析提醒时间（支持分钟数，如：30、60、120等）
-    if (reminderMinutesStr) {
-      const parsed = parseInt(reminderMinutesStr, 10);
-      if (!isNaN(parsed) && parsed > 0) {
-        reminderMinutes = parsed;
-      } else {
-        Logger.log(`  警告：提醒时间格式不正确，将忽略: "${reminderMinutesStr}"`);
-      }
-    }
-    
-    const config = {
-      sheetName: sheetNameTrimmed,
-      teacherCalendarId: teacherCalendarIdHeader !== undefined ? (row[teacherCalendarIdHeader] || '').trim() : '',
-      studentCalendarId: studentCalendarIdHeader !== undefined ? (row[studentCalendarIdHeader] || '').trim() : '',
-      teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
-      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
-      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE,
-      reminderMinutes: reminderMinutes
-    };
-    
-    // 如果邮箱为空，尝试使用日历ID作为邮箱
-    if (!config.teacherEmail && config.teacherCalendarId) {
-      config.teacherEmail = config.teacherCalendarId;
-    }
-    if (!config.studentEmail && config.studentCalendarId) {
-      config.studentEmail = config.studentCalendarId;
-    }
-    
-    // 如果时区为空，使用默认时区
-    if (!config.timezone) {
-      config.timezone = CONFIG.TIMEZONE;
-    }
-    
-    Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
-    Logger.log(`    老师日历ID: ${config.teacherCalendarId}, 老师邮箱: ${config.teacherEmail}`);
-    Logger.log(`    学生日历ID: ${config.studentCalendarId}, 学生邮箱: ${config.studentEmail}`);
-    Logger.log(`    时区: ${config.timezone}`);
-    Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
-    
-    sheetConfigMap.set(sheetNameTrimmed, config);
-  }
-  
-  Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个启用的 Sheet 配置`);
-  return sheetConfigMap;
-}
-
-/**
- * 处理单条课程记录
- */
-function processCourse(course, statusSheet) {
-  const result = {
-    course: course,
-    teacherEmail: { sent: false, eventId: null, error: null },
-    studentEmail: { sent: false, eventId: null, error: null },
-    status: '处理中'
-  };
-  
-  try {
-    // 获取已有的事件ID和token信息（在删除旧记录之前获取，以便判断是否应该更新）
-    const existingInfo = getExistingEventIds(statusSheet, course);
-    
-    // 如果有旧记录（日期变化），优先尝试更新现有事件，而不是删除后重新创建
-    if (course._oldRecords && course._oldRecords.length > 0) {
-      // 检查是否有相同记录ID的旧记录（说明是同一条记录，只是日期变化了）
-      const sameRecordIdOldRecord = course._oldRecords.find(oldRecord => 
-        oldRecord.recordId && course.recordId && oldRecord.recordId === course.recordId
-      );
-      
-      if (sameRecordIdOldRecord) {
-        // 如果是同一条记录（记录ID相同），说明只是日期变化，应该更新现有事件而不是删除后重新创建
-        Logger.log(`检测到同一条记录的日期变化（记录ID: ${course.recordId}），将更新现有事件而不是删除后重新创建`);
-        
-        // 将旧记录的事件ID传递给existingInfo，以便后续更新时使用
-        if (sameRecordIdOldRecord.teacherEventId && !existingInfo.teacherEventId) {
-          existingInfo.teacherEventId = sameRecordIdOldRecord.teacherEventId;
-          Logger.log(`使用旧记录的老师事件ID进行更新: ${sameRecordIdOldRecord.teacherEventId}`);
-        }
-        if (sameRecordIdOldRecord.studentEventId && !existingInfo.studentEventId) {
-          existingInfo.studentEventId = sameRecordIdOldRecord.studentEventId;
-          Logger.log(`使用旧记录的学生事件ID进行更新: ${sameRecordIdOldRecord.studentEventId}`);
-        }
-        
-        // 删除其他不同记录ID的旧记录（这些是真正的旧记录，需要删除）
-        const otherOldRecords = course._oldRecords.filter(oldRecord => 
-          !oldRecord.recordId || oldRecord.recordId !== course.recordId
-        );
-        
-        if (otherOldRecords.length > 0) {
-          Logger.log(`删除 ${otherOldRecords.length} 条其他旧记录`);
-          for (const oldRecord of otherOldRecords) {
-            // 尝试删除老师日历事件
-            if (oldRecord.teacherEventId) {
-              try {
-                if (oldRecord.teacherCalendarId) {
-                  deleteCalendarEvent(oldRecord.teacherCalendarId, oldRecord.teacherEventId);
-                  Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
-                } else {
-                  deleteCalendarEventById(oldRecord.teacherEventId);
-                  Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
-                }
-                addOperationDelay();
-              } catch (error) {
-                Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
-              }
-            }
-            
-            // 尝试删除学生日历事件
-            if (oldRecord.studentEventId) {
-              try {
-                if (oldRecord.studentCalendarId) {
-                  deleteCalendarEvent(oldRecord.studentCalendarId, oldRecord.studentEventId);
-                  Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
-                } else {
-                  deleteCalendarEventById(oldRecord.studentEventId);
-                  Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
-                }
-                addOperationDelay();
-              } catch (error) {
-                Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
-              }
-            }
-          }
-          
-          // 删除其他旧记录的状态记录
-          deleteOldStatusRecords(statusSheet, otherOldRecords);
-        }
-      } else {
-        // 如果没有相同记录ID的旧记录，说明是真正的旧记录，需要删除
-        Logger.log(`检测到 ${course._oldRecords.length} 条旧记录，将删除这些旧记录`);
-        for (const oldRecord of course._oldRecords) {
-          // 尝试删除老师日历事件
-          if (oldRecord.teacherEventId) {
-            try {
-              if (oldRecord.teacherCalendarId) {
-                deleteCalendarEvent(oldRecord.teacherCalendarId, oldRecord.teacherEventId);
-                Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
-              } else {
-                deleteCalendarEventById(oldRecord.teacherEventId);
-                Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
-              }
-              addOperationDelay();
-            } catch (error) {
-              Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
-            }
-          }
-          
-          // 尝试删除学生日历事件
-          if (oldRecord.studentEventId) {
-            try {
-              if (oldRecord.studentCalendarId) {
-                deleteCalendarEvent(oldRecord.studentCalendarId, oldRecord.studentEventId);
-                Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
-              } else {
-                deleteCalendarEventById(oldRecord.studentEventId);
-                Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
-              }
-              addOperationDelay();
-            } catch (error) {
-              Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
-            }
-          }
-        }
-        
-        // 删除旧状态记录
-        deleteOldStatusRecords(statusSheet, course._oldRecords);
-      }
-    }
-    
-    // 判断是否需要重新发送邮件（关键信息有变化时）
-    const needsResendEmail = existingInfo.hasChanges;
-    
-    // 1. 发送老师邮件（仅在关键信息变化时发送）
-    if (needsResendEmail) {
-      try {
-        sendCourseEmail(
-          course.teacherEmail,
-          course.teacherName,
-          course,
-          course.studentName
-        );
-        result.teacherEmail.sent = true;
-        Logger.log(`老师邮件发送成功: ${course.teacherEmail}`);
-      } catch (error) {
-        result.teacherEmail.error = error.message;
-        Logger.log(`老师邮件发送失败: ${error.message}`);
-      }
-    } else {
-      Logger.log(`老师邮件跳过（关键信息未变化）: ${course.teacherEmail}`);
-    }
-    
-    // 2. 创建或更新老师日历事件（仅在关键信息有变化或没有事件ID时）
-    if (existingInfo.hasChanges || !existingInfo.teacherEventId) {
-      try {
-        const teacherEventId = createOrUpdateCalendarEvent(
-          course.teacherCalendarId,
-          course,
-          existingInfo.teacherEventId
-        );
-        if (teacherEventId) {
-          result.teacherEmail.eventId = String(teacherEventId);
-          if (existingInfo.teacherEventId && existingInfo.hasChanges) {
-            Logger.log(`老师日历事件更新成功: ${teacherEventId}`);
-          } else if (existingInfo.teacherEventId) {
-            Logger.log(`老师日历事件保持不变: ${teacherEventId}`);
-          } else {
-            Logger.log(`老师日历事件创建成功: ${teacherEventId}`);
-          }
-        } else {
-          result.teacherEmail.error = '创建事件成功但未返回事件ID';
-          Logger.log(`老师日历事件处理失败: 创建事件成功但未返回事件ID`);
-        }
-        // 添加延迟，避免速率限制
-        addOperationDelay();
-      } catch (error) {
-        result.teacherEmail.error = error.message;
-        Logger.log(`老师日历事件处理失败: ${error.message}`);
-        // 如果是速率限制错误，记录详细信息
-        if (isRateLimitError(error)) {
-          Logger.log(`⚠️ 老师日历事件遇到速率限制，可能需要稍后重试`);
-        }
-        // 即使创建失败，也尝试保留已有的事件ID（如果有）
-        if (existingInfo.teacherEventId) {
-          result.teacherEmail.eventId = String(existingInfo.teacherEventId);
-          Logger.log(`保留已有老师日历事件ID: ${existingInfo.teacherEventId}`);
-        }
-      }
-    } else {
-      // token相同且已有事件ID，跳过更新
-      result.teacherEmail.eventId = existingInfo.teacherEventId ? String(existingInfo.teacherEventId) : null;
-      Logger.log(`老师日历事件跳过（token相同且已有事件）: ${existingInfo.teacherEventId}`);
-    }
-    
-    // 3. 发送学生邮件（仅在关键信息变化时发送）
-    if (needsResendEmail) {
-      try {
-        sendCourseEmail(
-          course.studentEmail,
-          course.studentName,
-          course,
-          course.teacherName
-        );
-        result.studentEmail.sent = true;
-        Logger.log(`学生邮件发送成功: ${course.studentEmail}`);
-      } catch (error) {
-        result.studentEmail.error = error.message;
-        Logger.log(`学生邮件发送失败: ${error.message}`);
-      }
-    } else {
-      Logger.log(`学生邮件跳过（关键信息未变化）: ${course.studentEmail}`);
-    }
-    
-    // 4. 创建或更新学生日历事件（仅在关键信息有变化或没有事件ID时）
-    if (existingInfo.hasChanges || !existingInfo.studentEventId) {
-      try {
-        const studentEventId = createOrUpdateCalendarEvent(
-          course.studentCalendarId,
-          course,
-          existingInfo.studentEventId
-        );
-        if (studentEventId) {
-          result.studentEmail.eventId = String(studentEventId);
-          if (existingInfo.studentEventId && existingInfo.hasChanges) {
-            Logger.log(`学生日历事件更新成功: ${studentEventId}`);
-          } else if (existingInfo.studentEventId) {
-            Logger.log(`学生日历事件保持不变: ${studentEventId}`);
-          } else {
-            Logger.log(`学生日历事件创建成功: ${studentEventId}`);
-          }
-        } else {
-          result.studentEmail.error = '创建事件成功但未返回事件ID';
-          Logger.log(`学生日历事件处理失败: 创建事件成功但未返回事件ID`);
-        }
-        // 添加延迟，避免速率限制
-        addOperationDelay();
-      } catch (error) {
-        result.studentEmail.error = error.message;
-        Logger.log(`学生日历事件处理失败: ${error.message}`);
-        // 如果是速率限制错误，记录详细信息
-        if (isRateLimitError(error)) {
-          Logger.log(`⚠️ 学生日历事件遇到速率限制，可能需要稍后重试`);
-        }
-        // 即使创建失败，也尝试保留已有的事件ID（如果有）
-        if (existingInfo.studentEventId) {
-          result.studentEmail.eventId = String(existingInfo.studentEventId);
-          Logger.log(`保留已有学生日历事件ID: ${existingInfo.studentEventId}`);
-        }
-      }
-    } else {
-      // token相同且已有事件ID，跳过更新
-      result.studentEmail.eventId = existingInfo.studentEventId ? String(existingInfo.studentEventId) : null;
-      Logger.log(`学生日历事件跳过（token相同且已有事件）: ${existingInfo.studentEventId}`);
-    }
-    
-    // 5. 判断整体状态
-    // 如果邮件跳过（因为token没变化），不应该影响成功判断
-    // 只要日历事件创建成功，就算成功
-    const teacherEventId = result.teacherEmail.eventId ? String(result.teacherEmail.eventId).trim() : '';
-    const studentEventId = result.studentEmail.eventId ? String(result.studentEmail.eventId).trim() : '';
-    const teacherSuccess = teacherEventId !== '' && !result.teacherEmail.error;
-    const studentSuccess = studentEventId !== '' && !result.studentEmail.error;
-    
-    Logger.log(`[${course.lessonNumber}] 状态判断: 老师事件ID=${teacherEventId || '无'}, 学生事件ID=${studentEventId || '无'}, 老师成功=${teacherSuccess}, 学生成功=${studentSuccess}`);
-    
-    if (teacherSuccess && studentSuccess) {
-      result.status = '已完成';
-    } else if (teacherSuccess || studentSuccess) {
-      result.status = '部分失败';
-    } else {
-      result.status = '失败';
-    }
-    
-    Logger.log(`[${course.lessonNumber}] 最终状态: ${result.status}`);
-    
-    // 6. 记录状态到隐藏sheet
-    updateStatusRecord(statusSheet, course, result);
-    
-    return result;
-    
-  } catch (error) {
-    result.status = '失败';
-    result.error = error.message;
-    updateStatusRecord(statusSheet, course, result);
-    throw error;
-  }
-}
-
-// ==================== 数据读取模块 ====================
-
-/**
  * 读取课程数据
- * @param {Sheet} sheet - 课程表对象
- * @param {Object} config - Sheet 配置信息（包含邮箱和日历ID）
- * @returns {Array<Object>} 课程数据数组
  */
 function readCourseData(sheet, config) {
   const dataRange = sheet.getDataRange();
@@ -1158,8 +793,7 @@ function readCourseData(sheet, config) {
         // 从配置中获取邮箱和日历ID
         teacherEmail: config.teacherEmail || '',
         studentEmail: config.studentEmail || '',
-        teacherCalendarId: config.teacherCalendarId || config.teacherEmail || '',
-        studentCalendarId: config.studentCalendarId || config.studentEmail || '',
+        organizerCalendarId: config.organizerCalendarId || '',
         rowIndex: i + 1 // 记录行号（正式表的行号，从1开始，包含表头），用于和状态表一一对应
       };
       
@@ -1177,7 +811,7 @@ function readCourseData(sheet, config) {
       course.token = calculateCourseToken(course);
       
       // 验证必要字段
-      if (!course.date || !course.teacherEmail || !course.studentEmail) {
+      if (!course.date || !course.organizerCalendarId) {
         Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段`);
         continue;
       }
@@ -1230,16 +864,9 @@ function readProcessedStatus(statusSheet) {
   const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
   const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
   const tokenCol = getColumnIndex(['token', '令牌', '哈希']);
-  const teacherEmailStatusCol = getColumnIndex(['老师邮件状态', 'teacher email status', '老师邮件']);
-  const teacherEmailTimeCol = getColumnIndex(['老师邮件发送时间', 'teacher email time', '老师邮件时间']);
-  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
-  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
-  const teacherEventTimeCol = getColumnIndex(['老师日历创建时间', 'teacher event time', '老师事件时间']);
-  const studentEmailStatusCol = getColumnIndex(['学生邮件状态', 'student email status', '学生邮件']);
-  const studentEmailTimeCol = getColumnIndex(['学生邮件发送时间', 'student email time', '学生邮件时间']);
-  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
-  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
-  const studentEventTimeCol = getColumnIndex(['学生日历创建时间', 'student event time', '学生事件时间']);
+  const organizerCalendarIdCol = getColumnIndex(['组织者日历id', 'organizer calendar id', '组织者日历', 'organizer calendar', '管理员日历id', 'admin calendar id']);
+  const organizerEventIdCol = getColumnIndex(['组织者日历事件id', 'organizer event id', '组织者事件id', 'organizer event id', '管理员日历事件id', 'admin event id']);
+  const organizerEventTimeCol = getColumnIndex(['组织者日历创建时间', 'organizer event time', '组织者事件时间', 'organizer event time', '管理员日历创建时间', 'admin event time']);
   const statusCol = getColumnIndex(['处理状态', 'status', '状态']);
   const lastUpdateTimeCol = getColumnIndex(['最后更新时间', 'last update time', '更新时间']);
   
@@ -1264,28 +891,37 @@ function readProcessedStatus(statusSheet) {
     const recordId = getValue(recordIdCol);
     const key = `${lessonNumber}_${date}`; // 课次_日期（向后兼容）
     
+    // 读取组织者日历ID和事件ID（确保不是Date对象）
+    let organizerCalendarId = getValue(organizerCalendarIdCol);
+    if (organizerCalendarId instanceof Date) {
+      organizerCalendarId = '';
+    } else {
+      organizerCalendarId = String(organizerCalendarId).trim();
+    }
+    
+    let organizerEventId = getValue(organizerEventIdCol);
+    if (organizerEventId instanceof Date) {
+      organizerEventId = '';
+    } else {
+      organizerEventId = String(organizerEventId).trim();
+    }
+    
     const record = {
       recordId: recordId, // 记录ID
       lessonNumber: lessonNumber,
       date: date,
       token: getValue(tokenCol), // Token（关键信息哈希）
-      teacherCalendarId: (getValue(teacherCalendarIdCol) && !(getValue(teacherCalendarIdCol) instanceof Date) && String(getValue(teacherCalendarIdCol)).trim()) || '', // 老师日历ID（用于删除事件）
-      teacherEventId: (getValue(teacherEventIdCol) && !(getValue(teacherEventIdCol) instanceof Date) && String(getValue(teacherEventIdCol)).trim()) || '', // 老师日历事件ID
-      studentCalendarId: (getValue(studentCalendarIdCol) && !(getValue(studentCalendarIdCol) instanceof Date) && String(getValue(studentCalendarIdCol)).trim()) || '', // 学生日历ID（用于删除事件）
-      studentEventId: (getValue(studentEventIdCol) && !(getValue(studentEventIdCol) instanceof Date) && String(getValue(studentEventIdCol)).trim()) || '', // 学生日历事件ID
+      organizerCalendarId: organizerCalendarId, // 组织者日历ID（用于删除事件）
+      organizerEventId: organizerEventId, // 组织者日历事件ID
       status: getValue(statusCol), // 处理状态
       rowIndex: i + 1 // 状态表的行号（从1开始，包含表头）
     };
     
     // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
     const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
-    if (record.teacherEventId && invalidStatusTexts.includes(record.teacherEventId)) {
-      Logger.log(`警告：老师事件ID包含状态文本，将被清空: "${record.teacherEventId}"`);
-      record.teacherEventId = '';
-    }
-    if (record.studentEventId && invalidStatusTexts.includes(record.studentEventId)) {
-      Logger.log(`警告：学生事件ID包含状态文本，将被清空: "${record.studentEventId}"`);
-      record.studentEventId = '';
+    if (record.organizerEventId && invalidStatusTexts.includes(record.organizerEventId)) {
+      Logger.log(`警告：组织者事件ID包含状态文本，将被清空: "${record.organizerEventId}"`);
+      record.organizerEventId = '';
     }
     
     // 通过key索引（向后兼容）
@@ -1338,7 +974,7 @@ function assignRecordIds(courses, processedRecords, statusSheet, mainSheet) {
     }
     
     // 尝试通过行号从状态表中获取记录ID
-    const statusRow = statusSheet.getRange(course.rowIndex, 1, 1, 14).getValues()[0];
+    const statusRow = statusSheet.getRange(course.rowIndex, 1, 1, statusSheet.getLastColumn()).getValues()[0];
     if (statusRow[0]) {
       // 状态表中已有记录ID，使用它并更新正式表
       recordId = statusRow[0];
@@ -1396,8 +1032,7 @@ function getExistingEventIds(statusSheet, course) {
   }
   
   return {
-    teacherEventId: existingRecord ? (existingRecord.teacherEventId || null) : null,
-    studentEventId: existingRecord ? (existingRecord.studentEventId || null) : null,
+    organizerEventId: existingRecord ? (existingRecord.organizerEventId || null) : null,
     token: existingRecord ? (existingRecord.token || null) : null,
     hasChanges: existingRecord ? (existingRecord.token !== course.token) : true
   };
@@ -1426,10 +1061,8 @@ function findDeletedRecords(courses, processedRecords, statusSheet) {
         recordId: recordId,
         lessonNumber: record.lessonNumber,
         date: record.date,
-        teacherCalendarId: record.teacherCalendarId || '',
-        teacherEventId: record.teacherEventId || '',
-        studentCalendarId: record.studentCalendarId || '',
-        studentEventId: record.studentEventId || '',
+        organizerCalendarId: record.organizerCalendarId || '',
+        organizerEventId: record.organizerEventId || '',
         rowIndex: record.rowIndex,
         token: record.token || ''
       });
@@ -1455,10 +1088,8 @@ function findDeletedRecords(courses, processedRecords, statusSheet) {
         recordId: record.recordId || '',
         lessonNumber: record.lessonNumber,
         date: record.date,
-        teacherCalendarId: record.teacherCalendarId || '',
-        teacherEventId: record.teacherEventId || '',
-        studentCalendarId: record.studentCalendarId || '',
-        studentEventId: record.studentEventId || '',
+        organizerCalendarId: record.organizerCalendarId || '',
+        organizerEventId: record.organizerEventId || '',
         rowIndex: record.rowIndex,
         token: record.token || ''
       });
@@ -1469,163 +1100,403 @@ function findDeletedRecords(courses, processedRecords, statusSheet) {
 }
 
 /**
+ * 查找相同课次但不同日期的旧记录（日期变化）
+ */
+function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, timezone) {
+  const oldRecords = [];
+  
+  if (!statusSheet || statusSheet.getLastRow() < 2) {
+    return oldRecords;
+  }
+  
+  // 获取时区（优先使用传入的时区，否则使用默认时区）
+  const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  
+  const dataRange = statusSheet.getDataRange();
+  const values = dataRange.getValues();
+  
+  // 读取表头，建立表头名称到列索引的映射
+  const headers = values[0];
+  const headerMap = {};
+  headers.forEach((header, index) => {
+    const headerKey = String(header).trim().toLowerCase();
+    headerMap[headerKey] = index;
+  });
+  
+  // 定义表头名称的多种变体（支持中英文）
+  const getColumnIndex = (headerNames) => {
+    for (const name of headerNames) {
+      const key = name.toLowerCase();
+      if (headerMap[key] !== undefined) {
+        return headerMap[key];
+      }
+    }
+    return undefined;
+  };
+  
+  // 获取各列的索引（使用表头名称而不是固定索引）
+  const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
+  const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
+  const organizerCalendarIdCol = getColumnIndex(['组织者日历id', 'organizer calendar id', '组织者日历', 'organizer calendar', '管理员日历id', 'admin calendar id']);
+  const organizerEventIdCol = getColumnIndex(['组织者日历事件id', 'organizer event id', '组织者事件id', 'organizer event id', '管理员日历事件id', 'admin event id']);
+  const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
+  
+  // 标准化当前日期用于比较
+  const currentDateStr = currentDate instanceof Date ?
+    Utilities.formatDate(currentDate, tz, 'yyyy-MM-dd') :
+    String(currentDate);
+  
+  // 使用表头映射获取值
+  const getValue = (row, colIndex) => {
+    if (colIndex === undefined) return '';
+    return row[colIndex] || '';
+  };
+  
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const rowLessonNumber = getValue(row, lessonNumberCol);
+    const rowDate = getValue(row, dateCol);
+    
+    // 如果课次相同但日期不同
+    if (rowLessonNumber === lessonNumber && rowDate) {
+      const rowDateStr = rowDate instanceof Date ?
+        Utilities.formatDate(rowDate, tz, 'yyyy-MM-dd') :
+        String(rowDate);
+      
+      if (rowDateStr !== currentDateStr) {
+        // 获取记录ID（如果存在）
+        const recordId = getValue(row, recordIdCol);
+        
+        oldRecords.push({
+          recordId: recordId, // 添加记录ID，用于判断是否是同一条记录
+          lessonNumber: rowLessonNumber,
+          date: rowDate,
+          organizerCalendarId: getValue(row, organizerCalendarIdCol),
+          organizerEventId: getValue(row, organizerEventIdCol),
+          rowIndex: i + 1
+        });
+      }
+    }
+  }
+  
+  return oldRecords;
+}
+
+/**
+ * 删除旧状态记录
+ */
+function deleteOldStatusRecords(statusSheet, oldRecords) {
+  // 从后往前删除，避免索引变化
+  const rowsToDelete = oldRecords.map(r => r.rowIndex).sort((a, b) => b - a);
+  
+  for (const rowIndex of rowsToDelete) {
+    try {
+      statusSheet.deleteRow(rowIndex);
+      Logger.log(`删除旧状态记录: 第${rowIndex}行`);
+    } catch (error) {
+      Logger.log(`删除旧状态记录失败: 第${rowIndex}行 - ${error.message}`);
+    }
+  }
+}
+
+// ==================== 第四部分：日历事件创建和更新（组织者模式） ====================
+
+/**
+ * 处理单条课程记录
+ */
+function processCourse(course, statusSheet, config) {
+  const result = {
+    course: course,
+    organizerEvent: { eventId: null, error: null },
+    status: '处理中'
+  };
+  
+  try {
+    // 获取已有的事件ID和token信息（在删除旧记录之前获取，以便判断是否应该更新）
+    const existingInfo = getExistingEventIds(statusSheet, course);
+    
+    // 如果有旧记录（日期变化），优先尝试更新现有事件，而不是删除后重新创建
+    if (course._oldRecords && course._oldRecords.length > 0) {
+      // 检查是否有相同记录ID的旧记录（说明是同一条记录，只是日期变化了）
+      const sameRecordIdOldRecord = course._oldRecords.find(oldRecord => 
+        oldRecord.recordId && course.recordId && oldRecord.recordId === course.recordId
+      );
+      
+      if (sameRecordIdOldRecord) {
+        // 如果是同一条记录（记录ID相同），说明只是日期变化，应该更新现有事件而不是删除后重新创建
+        Logger.log(`检测到同一条记录的日期变化（记录ID: ${course.recordId}），将更新现有事件而不是删除后重新创建`);
+        
+        // 将旧记录的事件ID传递给existingInfo，以便后续更新时使用
+        if (sameRecordIdOldRecord.organizerEventId && !existingInfo.organizerEventId) {
+          existingInfo.organizerEventId = sameRecordIdOldRecord.organizerEventId;
+          Logger.log(`使用旧记录的组织者事件ID进行更新: ${sameRecordIdOldRecord.organizerEventId}`);
+        }
+        
+        // 删除其他不同记录ID的旧记录（这些是真正的旧记录，需要删除）
+        const otherOldRecords = course._oldRecords.filter(oldRecord => 
+          !oldRecord.recordId || oldRecord.recordId !== course.recordId
+        );
+        
+        if (otherOldRecords.length > 0) {
+          Logger.log(`删除 ${otherOldRecords.length} 条其他旧记录`);
+          for (const oldRecord of otherOldRecords) {
+            // 尝试删除组织者日历事件
+            if (oldRecord.organizerEventId) {
+              try {
+                if (oldRecord.organizerCalendarId) {
+                  deleteCalendarEvent(oldRecord.organizerCalendarId, oldRecord.organizerEventId);
+                  Logger.log(`删除旧组织者日历事件成功: ${oldRecord.organizerEventId}`);
+                } else {
+                  deleteCalendarEventById(oldRecord.organizerEventId);
+                  Logger.log(`删除旧组织者日历事件成功: ${oldRecord.organizerEventId}`);
+                }
+                addOperationDelay();
+              } catch (error) {
+                Logger.log(`删除旧组织者日历事件失败: ${oldRecord.organizerEventId} - ${error.message}`);
+              }
+            }
+          }
+          
+          // 删除其他旧记录的状态记录
+          deleteOldStatusRecords(statusSheet, otherOldRecords);
+        }
+      } else {
+        // 如果没有相同记录ID的旧记录，说明是真正的旧记录，需要删除
+        Logger.log(`检测到 ${course._oldRecords.length} 条旧记录，将删除这些旧记录`);
+        for (const oldRecord of course._oldRecords) {
+          // 尝试删除组织者日历事件
+          if (oldRecord.organizerEventId) {
+            try {
+              if (oldRecord.organizerCalendarId) {
+                deleteCalendarEvent(oldRecord.organizerCalendarId, oldRecord.organizerEventId);
+                Logger.log(`删除旧组织者日历事件成功: ${oldRecord.organizerEventId}`);
+              } else {
+                deleteCalendarEventById(oldRecord.organizerEventId);
+                Logger.log(`删除旧组织者日历事件成功: ${oldRecord.organizerEventId}`);
+              }
+              addOperationDelay();
+            } catch (error) {
+              Logger.log(`删除旧组织者日历事件失败: ${oldRecord.organizerEventId} - ${error.message}`);
+            }
+          }
+        }
+        
+        // 删除旧状态记录
+        deleteOldStatusRecords(statusSheet, course._oldRecords);
+      }
+    }
+    
+    // 判断是否需要更新事件（关键信息有变化时）
+    const needsUpdate = existingInfo.hasChanges;
+    
+    // 创建或更新组织者日历事件（在组织者日历上创建，老师和学生作为受邀者）
+    // 系统会自动发送邀请邮件给受邀者
+    if (needsUpdate || !existingInfo.organizerEventId) {
+      try {
+        // 在组织者日历上创建或更新事件，添加老师和学生作为受邀者
+        const organizerEventId = createOrUpdateCalendarEvent(
+          config.organizerCalendarId,
+          course,
+          existingInfo.organizerEventId,
+          config
+        );
+        if (organizerEventId) {
+          result.organizerEvent.eventId = String(organizerEventId);
+          if (existingInfo.organizerEventId && needsUpdate) {
+            Logger.log(`组织者日历事件更新成功: ${organizerEventId}，已通知所有受邀人`);
+          } else if (existingInfo.organizerEventId) {
+            Logger.log(`组织者日历事件保持不变: ${organizerEventId}`);
+          } else {
+            Logger.log(`组织者日历事件创建成功: ${organizerEventId}，已邀请老师和学生`);
+          }
+        } else {
+          result.organizerEvent.error = '创建事件成功但未返回事件ID';
+          Logger.log(`组织者日历事件处理失败: 创建事件成功但未返回事件ID`);
+        }
+        // 添加延迟，避免速率限制
+        addOperationDelay();
+      } catch (error) {
+        result.organizerEvent.error = error.message;
+        Logger.log(`组织者日历事件处理失败: ${error.message}`);
+        // 如果是速率限制错误，记录详细信息
+        if (isRateLimitError(error)) {
+          Logger.log(`⚠️ 组织者日历事件遇到速率限制，可能需要稍后重试`);
+        }
+        // 即使创建失败，也尝试保留已有的事件ID（如果有）
+        if (existingInfo.organizerEventId) {
+          result.organizerEvent.eventId = String(existingInfo.organizerEventId);
+          Logger.log(`保留已有组织者日历事件ID: ${existingInfo.organizerEventId}`);
+        }
+      }
+    } else {
+      // token相同且已有事件ID，跳过更新
+      result.organizerEvent.eventId = existingInfo.organizerEventId ? String(existingInfo.organizerEventId) : null;
+      Logger.log(`组织者日历事件跳过（token相同且已有事件）: ${existingInfo.organizerEventId}`);
+    }
+    
+    // 判断整体状态
+    const organizerEventId = result.organizerEvent.eventId ? String(result.organizerEvent.eventId).trim() : '';
+    const organizerSuccess = organizerEventId !== '' && !result.organizerEvent.error;
+    
+    Logger.log(`[${course.lessonNumber}] 状态判断: 组织者事件ID=${organizerEventId || '无'}, 成功=${organizerSuccess}`);
+    
+    if (organizerSuccess) {
+      result.status = '已完成';
+    } else {
+      result.status = '失败';
+    }
+    
+    Logger.log(`[${course.lessonNumber}] 最终状态: ${result.status}`);
+    
+    // 记录状态到隐藏sheet
+    updateStatusRecord(statusSheet, course, result);
+    
+    return result;
+    
+  } catch (error) {
+    result.status = '失败';
+    result.error = error.message;
+    updateStatusRecord(statusSheet, course, result);
+    throw error;
+  }
+}
+
+// ==================== 第五部分：删除和取消功能 ====================
+
+/**
  * 取消课程（删除日历事件并发送取消邮件）
  */
-function cancelCourse(deletedRecord, statusSheet) {
+function cancelCourse(deletedRecord, statusSheet, config) {
   // 从状态表中获取日历ID和事件ID信息
-  // deletedRecord 已经包含了 teacherEventId 和 studentEventId
-  // 还需要获取日历ID（老师日历ID和学生日历ID）
+  // deletedRecord 已经包含了 organizerEventId
+  // 还需要获取日历ID（组织者日历ID）
   
   // 读取状态表中的完整信息（作为备用）
-  const statusRow = statusSheet.getRange(deletedRecord.rowIndex, 1, 1, 16).getValues()[0];
+  const headerRow = statusSheet.getRange(1, 1, 1, statusSheet.getLastColumn()).getValues()[0];
+  const headerMap = {};
+  headerRow.forEach((header, index) => {
+    const headerKey = String(header).trim().toLowerCase();
+    headerMap[headerKey] = index;
+  });
   
-  // 获取日历ID（优先使用deletedRecord中的，如果为空则从状态表中读取）
-  const teacherCalendarId = deletedRecord.teacherCalendarId || statusRow[6] || ''; // 老师日历ID
-  const studentCalendarId = deletedRecord.studentCalendarId || statusRow[11] || ''; // 学生日历ID
+  const getColumnIndex = (headerNames) => {
+    for (const name of headerNames) {
+      const key = name.toLowerCase();
+      if (headerMap[key] !== undefined) {
+        return headerMap[key];
+      }
+    }
+    return undefined;
+  };
   
-  // 1. 删除老师日历事件
-  if (deletedRecord.teacherEventId) {
+  const organizerCalendarIdCol = getColumnIndex(['组织者日历id', 'organizer calendar id', '组织者日历', 'organizer calendar', '管理员日历id', 'admin calendar id']);
+  const organizerEventIdCol = getColumnIndex(['组织者日历事件id', 'organizer event id', '组织者事件id', 'organizer event id', '管理员日历事件id', 'admin event id']);
+  
+  const statusRow = statusSheet.getRange(deletedRecord.rowIndex, 1, 1, statusSheet.getLastColumn()).getValues()[0];
+  
+  // 获取日历ID（优先使用deletedRecord中的，如果为空则从状态表中读取，最后使用config中的）
+  const organizerCalendarId = deletedRecord.organizerCalendarId || 
+                              (organizerCalendarIdCol !== undefined ? statusRow[organizerCalendarIdCol] : '') || 
+                              (config ? config.organizerCalendarId : '') || '';
+  const organizerEventId = deletedRecord.organizerEventId || 
+                           (organizerEventIdCol !== undefined ? statusRow[organizerEventIdCol] : '') || '';
+  
+  // 1. 删除组织者日历事件
+  if (organizerEventId) {
     try {
-      if (teacherCalendarId) {
+      if (organizerCalendarId) {
         // 如果有日历ID，直接删除
-        deleteCalendarEvent(teacherCalendarId, deletedRecord.teacherEventId);
-        Logger.log(`删除老师日历事件成功: ${deletedRecord.teacherEventId} (日历: ${teacherCalendarId})`);
+        deleteCalendarEvent(organizerCalendarId, organizerEventId);
+        Logger.log(`删除组织者日历事件成功: ${organizerEventId} (日历: ${organizerCalendarId})`);
       } else {
         // 如果没有日历ID，尝试通过事件ID删除（遍历所有日历）
-        deleteCalendarEventById(deletedRecord.teacherEventId);
-        Logger.log(`删除老师日历事件成功: ${deletedRecord.teacherEventId}`);
+        deleteCalendarEventById(organizerEventId);
+        Logger.log(`删除组织者日历事件成功: ${organizerEventId}`);
       }
       // 添加延迟，避免速率限制
       addOperationDelay();
     } catch (error) {
-      Logger.log(`删除老师日历事件失败: ${deletedRecord.teacherEventId} - ${error.message}`);
+      Logger.log(`删除组织者日历事件失败: ${organizerEventId} - ${error.message}`);
       // 如果是速率限制错误，记录详细信息
       if (isRateLimitError(error)) {
-        Logger.log(`⚠️ 删除老师日历事件遇到速率限制，可能需要稍后重试`);
+        Logger.log(`⚠️ 删除组织者日历事件遇到速率限制，可能需要稍后重试`);
       }
     }
   }
   
-  // 2. 删除学生日历事件
-  if (deletedRecord.studentEventId) {
-    try {
-      if (studentCalendarId) {
-        // 如果有日历ID，直接删除
-        deleteCalendarEvent(studentCalendarId, deletedRecord.studentEventId);
-        Logger.log(`删除学生日历事件成功: ${deletedRecord.studentEventId} (日历: ${studentCalendarId})`);
-      } else {
-        // 如果没有日历ID，尝试通过事件ID删除（遍历所有日历）
-        deleteCalendarEventById(deletedRecord.studentEventId);
-        Logger.log(`删除学生日历事件成功: ${deletedRecord.studentEventId}`);
-      }
-      // 添加延迟，避免速率限制
-      addOperationDelay();
-    } catch (error) {
-      Logger.log(`删除学生日历事件失败: ${deletedRecord.studentEventId} - ${error.message}`);
-      // 如果是速率限制错误，记录详细信息
-      if (isRateLimitError(error)) {
-        Logger.log(`⚠️ 删除学生日历事件遇到速率限制，可能需要稍后重试`);
-      }
-    }
-  }
-  
-  // 3. 发送取消邮件（需要从日历事件中获取参与者信息）
-  // 由于记录已被删除，我们无法获取邮箱信息
-  // 可以通过日历事件获取参与者信息
+  // 2. 发送取消邮件给所有受邀者（老师和学生）
+  // 从日历事件中获取参与者信息，或者从config中获取
   try {
-    sendCancellationEmails(deletedRecord);
+    sendCancellationEmails(deletedRecord, config);
   } catch (error) {
     Logger.log(`发送取消邮件失败: ${error.message}`);
   }
   
-  // 4. 清空状态记录（保留行，但清空内容）
-  const emptyRow = ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']; // 16列（包含记录ID和日历ID）
+  // 3. 清空状态记录（保留行，但清空内容）
+  const emptyRow = ['', '', '', '', '', '', '', '', '']; // 9列（包含记录ID和组织者日历ID）
   statusSheet.getRange(deletedRecord.rowIndex, 1, 1, emptyRow.length).setValues([emptyRow]);
-}
-
-/**
- * 通过事件ID删除日历事件（尝试所有可能的日历）
- */
-function deleteCalendarEventById(eventId) {
-  if (!eventId) {
-    return;
-  }
-  
-  // 获取所有可访问的日历
-  const calendars = CalendarApp.getAllCalendars();
-  
-  for (const calendar of calendars) {
-    try {
-      const event = calendar.getEventById(eventId);
-      if (event) {
-        deleteEventWithRetry(event);
-        Logger.log(`删除日历事件成功: ${eventId} (日历: ${calendar.getName()})`);
-        return; // 找到并删除后退出
-      }
-    } catch (error) {
-      // 如果是速率限制错误，记录并继续
-      if (isRateLimitError(error)) {
-        Logger.log(`删除日历事件时遇到速率限制: ${eventId} - ${error.message}`);
-      }
-      // 继续尝试下一个日历
-      continue;
-    }
-  }
-  
-  Logger.log(`未找到日历事件: ${eventId}`);
 }
 
 /**
  * 发送课程取消邮件
  */
-function sendCancellationEmails(deletedRecord) {
+function sendCancellationEmails(deletedRecord, config) {
   // 由于记录已被删除，我们需要从日历事件中获取参与者信息
   // 或者从状态表中获取之前保存的信息
   
   // 尝试从日历事件中获取参与者信息
-  const calendars = CalendarApp.getAllCalendars();
   let event = null;
   let calendar = null;
   
-  // 先尝试通过老师日历事件ID获取
-  if (deletedRecord.teacherEventId) {
-    for (const cal of calendars) {
-      try {
-        event = cal.getEventById(deletedRecord.teacherEventId);
-        if (event) {
-          calendar = cal;
-          break;
+  // 尝试通过组织者日历事件ID获取
+  if (deletedRecord.organizerEventId) {
+    try {
+      // 优先使用组织者日历ID
+      if (deletedRecord.organizerCalendarId) {
+        calendar = getCalendarByIdOrEmail(deletedRecord.organizerCalendarId, null);
+        if (calendar) {
+          event = calendar.getEventById(deletedRecord.organizerEventId);
         }
-      } catch (error) {
-        continue;
       }
+      
+      // 如果没找到，尝试遍历所有日历
+      if (!event) {
+        const calendars = CalendarApp.getAllCalendars();
+        for (const cal of calendars) {
+          try {
+            event = cal.getEventById(deletedRecord.organizerEventId);
+            if (event) {
+              calendar = cal;
+              break;
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      Logger.log(`获取日历事件失败: ${error.message}`);
     }
   }
   
-  // 如果没找到，尝试通过学生日历事件ID获取
-  if (!event && deletedRecord.studentEventId) {
-    for (const cal of calendars) {
-      try {
-        event = cal.getEventById(deletedRecord.studentEventId);
-        if (event) {
-          calendar = cal;
-          break;
-        }
-      } catch (error) {
-        continue;
-      }
-    }
+  // 如果无法从事件中获取参与者信息，使用config中的邮箱
+  let teacherEmail = null;
+  let studentEmail = null;
+  
+  if (event) {
+    // 从事件中获取参与者信息
+    const guests = event.getGuestList();
+    teacherEmail = guests.length > 0 ? guests[0].getEmail() : null;
+    studentEmail = guests.length > 1 ? guests[1].getEmail() : null;
   }
   
-  if (!event) {
-    Logger.log(`无法获取日历事件信息，跳过发送取消邮件`);
-    return;
+  // 如果从事件中无法获取，使用config中的邮箱
+  if (!teacherEmail && config && config.teacherEmail) {
+    teacherEmail = config.teacherEmail;
   }
-  
-  // 从事件中获取参与者信息
-  const guests = event.getGuestList();
-  const teacherEmail = guests.length > 0 ? guests[0].getEmail() : null;
-  const studentEmail = guests.length > 1 ? guests[1].getEmail() : null;
+  if (!studentEmail && config && config.studentEmail) {
+    studentEmail = config.studentEmail;
+  }
   
   if (!teacherEmail && !studentEmail) {
     Logger.log(`无法获取参与者邮箱，跳过发送取消邮件`);
@@ -1633,8 +1504,8 @@ function sendCancellationEmails(deletedRecord) {
   }
   
   // 构建取消邮件内容
-  const courseTitle = event.getTitle() || '课程';
-  const eventDate = event.getStartTime();
+  const courseTitle = event ? (event.getTitle() || '课程') : '课程';
+  const eventDate = event ? event.getStartTime() : new Date();
   // 使用默认时区格式化日期（取消邮件时可能没有 course 对象）
   const timezone = CONFIG.TIMEZONE || Session.getScriptTimeZone();
   const dateStr = Utilities.formatDate(eventDate, timezone, 'yyyy-MM-dd');
@@ -1707,112 +1578,38 @@ function sendCancellationEmails(deletedRecord) {
 }
 
 /**
- * 查找相同课次但不同日期的旧记录（用于检测日期变化）
- * @param {Sheet} statusSheet - 状态表
- * @param {string} lessonNumber - 课次
- * @param {Date|string} currentDate - 当前日期
- * @param {string} timezone - 时区（可选，默认使用脚本时区）
+ * 通过事件ID删除日历事件（尝试所有可能的日历）
  */
-function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, timezone) {
-  const oldRecords = [];
-  
-  if (!statusSheet || statusSheet.getLastRow() < 2) {
-    return oldRecords;
+function deleteCalendarEventById(eventId) {
+  if (!eventId) {
+    return;
   }
   
-  // 获取时区（优先使用传入的时区，否则使用默认时区）
-  const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+  // 获取所有可访问的日历
+  const calendars = CalendarApp.getAllCalendars();
   
-  const dataRange = statusSheet.getDataRange();
-  const values = dataRange.getValues();
-  
-  // 读取表头，建立表头名称到列索引的映射
-  const headers = values[0];
-  const headerMap = {};
-  headers.forEach((header, index) => {
-    const headerKey = String(header).trim().toLowerCase();
-    headerMap[headerKey] = index;
-  });
-  
-  // 定义表头名称的多种变体（支持中英文）
-  const getColumnIndex = (headerNames) => {
-    for (const name of headerNames) {
-      const key = name.toLowerCase();
-      if (headerMap[key] !== undefined) {
-        return headerMap[key];
+  for (const calendar of calendars) {
+    try {
+      const event = calendar.getEventById(eventId);
+      if (event) {
+        deleteEventWithRetry(event);
+        Logger.log(`删除日历事件成功: ${eventId} (日历: ${calendar.getName()})`);
+        return; // 找到并删除后退出
       }
-    }
-    return undefined;
-  };
-  
-  // 获取各列的索引（使用表头名称而不是固定索引）
-  const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
-  const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
-  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
-  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
-  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
-  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
-  
-  // 标准化当前日期用于比较
-  const currentDateStr = currentDate instanceof Date ?
-    Utilities.formatDate(currentDate, tz, 'yyyy-MM-dd') :
-    String(currentDate);
-  
-  // 使用表头映射获取值
-  const getValue = (row, colIndex) => {
-    if (colIndex === undefined) return '';
-    return row[colIndex] || '';
-  };
-  
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const rowLessonNumber = getValue(row, lessonNumberCol);
-    const rowDate = getValue(row, dateCol);
-    
-    // 如果课次相同但日期不同
-    if (rowLessonNumber === lessonNumber && rowDate) {
-      const rowDateStr = rowDate instanceof Date ?
-        Utilities.formatDate(rowDate, tz, 'yyyy-MM-dd') :
-        String(rowDate);
-      
-      if (rowDateStr !== currentDateStr) {
-        // 获取记录ID（如果存在）
-        const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
-        const recordId = getValue(row, recordIdCol);
-        
-        oldRecords.push({
-          recordId: recordId, // 添加记录ID，用于判断是否是同一条记录
-          lessonNumber: rowLessonNumber,
-          date: rowDate,
-          teacherCalendarId: getValue(row, teacherCalendarIdCol),
-          teacherEventId: getValue(row, teacherEventIdCol),
-          studentCalendarId: getValue(row, studentCalendarIdCol),
-          studentEventId: getValue(row, studentEventIdCol),
-          rowIndex: i + 1
-        });
+    } catch (error) {
+      // 如果是速率限制错误，记录并继续
+      if (isRateLimitError(error)) {
+        Logger.log(`删除日历事件时遇到速率限制: ${eventId} - ${error.message}`);
       }
+      // 继续尝试下一个日历
+      continue;
     }
   }
   
-  return oldRecords;
+  Logger.log(`未找到日历事件: ${eventId}`);
 }
 
-/**
- * 删除旧状态记录
- */
-function deleteOldStatusRecords(statusSheet, oldRecords) {
-  // 从后往前删除，避免索引变化
-  const rowsToDelete = oldRecords.map(r => r.rowIndex).sort((a, b) => b - a);
-  
-  for (const rowIndex of rowsToDelete) {
-    try {
-      statusSheet.deleteRow(rowIndex);
-      Logger.log(`删除旧状态记录: 第${rowIndex}行`);
-    } catch (error) {
-      Logger.log(`删除旧状态记录失败: 第${rowIndex}行 - ${error.message}`);
-    }
-  }
-}
+// ==================== 第六部分：工具函数和辅助功能 ====================
 
 /**
  * 获取日历（通过ID或邮箱，使用多种方法尝试）
@@ -1828,7 +1625,6 @@ function getCalendarByIdOrEmail(calendarId, course) {
   let calendar = null;
   
   // 方法1: 直接通过ID获取（这是最常用的方法）
-  // 注意：即使 getAllCalendars() 不返回共享的日历，getCalendarById() 也可能可以访问
   try {
     calendar = CalendarApp.getCalendarById(calendarId);
     if (calendar) {
@@ -1853,43 +1649,6 @@ function getCalendarByIdOrEmail(calendarId, course) {
       }
     } catch (error) {
       Logger.log(`✗ 通过ID（带后缀）获取日历失败: ${idWithSuffix} - ${error.message}`);
-    }
-    
-    // 尝试使用邮箱作为ID（去掉可能的域名部分）
-    const emailParts = calendarId.split('@');
-    if (emailParts.length === 2) {
-      const emailId = emailParts[0] + '@gmail.com';
-      if (emailId !== calendarId) {
-        try {
-          calendar = CalendarApp.getCalendarById(emailId);
-          if (calendar) {
-            Logger.log(`✓ 通过邮箱ID获取日历成功: ${emailId} (${calendar.getName()})`);
-            return calendar;
-          }
-        } catch (error) {
-          Logger.log(`✗ 通过邮箱ID获取日历失败: ${emailId} - ${error.message}`);
-        }
-      }
-    }
-  }
-  
-  // 方法2: 从课程信息中获取对应的邮箱并尝试（如果calendarId不是邮箱）
-  if (course && !calendarId.includes('@')) {
-    // 如果calendarId不是邮箱，尝试从课程信息中获取邮箱
-    const emailToTry = course.teacherCalendarId === calendarId ? 
-                       course.teacherEmail : 
-                       (course.studentCalendarId === calendarId ? course.studentEmail : null);
-    
-    if (emailToTry) {
-      try {
-        calendar = CalendarApp.getCalendarById(emailToTry);
-        if (calendar) {
-          Logger.log(`✓ 通过课程邮箱获取日历成功: ${emailToTry} (${calendar.getName()})`);
-          return calendar;
-        }
-      } catch (error) {
-        Logger.log(`✗ 通过课程邮箱获取日历失败: ${emailToTry} - ${error.message}`);
-      }
     }
   }
   
@@ -2012,36 +1771,6 @@ function calculateCourseToken(course) {
   
   return token;
 }
-
-// ==================== 邮件发送模块 ====================
-
-/**
- * 发送课程邮件
- */
-function sendCourseEmail(recipientEmail, recipientName, course, otherPartyName) {
-  if (!recipientEmail) {
-    throw new Error('收件人邮箱为空');
-  }
-  
-  const subject = CONFIG.EMAIL_TEMPLATE.subject.replace('{courseTitle}', course.courseTitle);
-  
-  const body = CONFIG.EMAIL_TEMPLATE.body
-    .replace(/{recipientName}/g, recipientName)
-    .replace(/{courseTitle}/g, course.courseTitle)
-    .replace(/{courseDate}/g, formatDate(course.date))
-    .replace(/{startTime}/g, course.startTime)
-    .replace(/{endTime}/g, course.endTime)
-    .replace(/{teacherName}/g, course.teacherName)
-    .replace(/{studentName}/g, course.studentName);
-  
-  MailApp.sendEmail({
-    to: recipientEmail,
-    subject: subject,
-    htmlBody: body
-  });
-}
-
-// ==================== 速率限制处理模块 ====================
 
 /**
  * 检查是否是速率限制错误
@@ -2177,7 +1906,7 @@ function updateEventWithRetry(event, title, description, startTime, endTime, gue
       // 先获取现有参与者列表
       const existingGuests = event.getGuestList();
       const existingEmails = existingGuests.map(guest => guest.getEmail());
-      const newEmails = guests.split(',').map(email => email.trim());
+      const newEmails = guests.split(',').map(email => email.trim()).filter(email => email);
       
       // 添加新参与者
       for (const email of newEmails) {
@@ -2219,16 +1948,15 @@ function addOperationDelay() {
   Utilities.sleep(CONFIG.RATE_LIMIT.DELAY_BETWEEN_OPERATIONS);
 }
 
-// ==================== 日历事件创建模块 ====================
-
 /**
- * 创建或更新日历事件
- * @param {string} calendarId - 日历ID
+ * 创建或更新日历事件（在组织者日历上创建，老师和学生作为受邀者）
+ * @param {string} calendarId - 组织者日历ID
  * @param {Object} course - 课程对象
  * @param {string|null} existingEventId - 已有的事件ID（如果存在则更新，否则创建）
+ * @param {Object} config - 配置对象（包含老师和学生邮箱）
  * @returns {string} 事件ID
  */
-function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
+function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config) {
   if (!calendarId) {
     throw new Error('日历ID为空');
   }
@@ -2257,7 +1985,21 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
   const eventDescription = `课程：${course.courseTitle}\n老师：${course.teacherName}\n学生：${course.studentName}\n课次：${course.lessonNumber}`;
   const eventStart = new Date(startDateTime);
   const eventEnd = new Date(endDateTime);
-  const eventGuests = `${course.teacherEmail},${course.studentEmail}`;
+  
+  // 构建受邀者列表（老师和学生）
+  const guests = [];
+  if (config && config.teacherEmail) {
+    guests.push(config.teacherEmail);
+  }
+  if (config && config.studentEmail) {
+    guests.push(config.studentEmail);
+  }
+  // 如果配置中没有邮箱，尝试从课程对象中获取（向后兼容）
+  if (guests.length === 0) {
+    if (course.teacherEmail) guests.push(course.teacherEmail);
+    if (course.studentEmail) guests.push(course.studentEmail);
+  }
+  const eventGuests = guests.join(',');
   
   let event;
   
@@ -2270,13 +2012,16 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
       updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests);
       
       // 更新提醒（如果配置了提醒时间）
+      // 注意：提醒会发送给所有参与者，包括组织者和受邀者（老师和学生）
       if (course.reminderMinutes && course.reminderMinutes > 0) {
         try {
           // 清除现有提醒
           event.removeAllReminders();
-          // 添加新的提醒
+          // 添加邮件提醒（会发送给所有参与者，包括受邀者）
           event.addEmailReminder(course.reminderMinutes);
-          Logger.log(`更新邮件提醒: 提前 ${course.reminderMinutes} 分钟`);
+          // 添加弹出提醒（在日历应用中显示，适用于所有参与者）
+          event.addPopupReminder(course.reminderMinutes);
+          Logger.log(`更新提醒: 提前 ${course.reminderMinutes} 分钟（邮件+弹出，所有参与者包括受邀者）`);
         } catch (error) {
           Logger.log(`更新提醒失败: ${error.message}`);
           // 提醒失败不影响事件更新，继续执行
@@ -2314,10 +2059,14 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
   );
   
   // 添加提醒（如果配置了提醒时间）
+  // 注意：提醒会发送给所有参与者，包括组织者和受邀者（老师和学生）
   if (course.reminderMinutes && course.reminderMinutes > 0) {
     try {
+      // 添加邮件提醒（会发送给所有参与者，包括受邀者）
       event.addEmailReminder(course.reminderMinutes);
-      Logger.log(`添加邮件提醒: 提前 ${course.reminderMinutes} 分钟`);
+      // 添加弹出提醒（在日历应用中显示，适用于所有参与者）
+      event.addPopupReminder(course.reminderMinutes);
+      Logger.log(`添加提醒: 提前 ${course.reminderMinutes} 分钟（邮件+弹出，所有参与者包括受邀者）`);
     } catch (error) {
       Logger.log(`添加提醒失败: ${error.message}`);
       // 提醒失败不影响事件创建，继续执行
@@ -2327,16 +2076,6 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId) {
   Logger.log(`创建新日历事件: ${event.getId()}`);
   return event.getId();
 }
-
-/**
- * 创建日历事件（保留向后兼容）
- * @deprecated 使用 createOrUpdateCalendarEvent 代替
- */
-function createCalendarEvent(calendarId, course) {
-  return createOrUpdateCalendarEvent(calendarId, course, null);
-}
-
-// ==================== 状态记录模块 ====================
 
 /**
  * 确保状态表存在
@@ -2361,18 +2100,11 @@ function ensureStatusSheet(spreadsheet, statusSheetName) {
       '课次',              // 1 - 索引字段
       '日期',              // 2 - 索引字段
       'Token',             // 3 - 关键信息哈希值（用于检测变化）
-      '老师邮件状态',      // 4
-      '老师邮件发送时间',  // 5
-      '老师日历ID',        // 6 - 老师日历ID（用于删除事件）
-      '老师日历事件ID',    // 7 - 老师日历事件ID
-      '老师日历创建时间',  // 8
-      '学生邮件状态',      // 9
-      '学生邮件发送时间',  // 10
-      '学生日历ID',        // 11 - 学生日历ID（用于删除事件）
-      '学生日历事件ID',    // 12 - 学生日历事件ID
-      '学生日历创建时间',  // 13
-      '处理状态',          // 14
-      '最后更新时间'       // 15
+      '组织者日历ID',      // 4 - 组织者日历ID（用于删除事件）
+      '组织者日历事件ID',  // 5 - 组织者日历事件ID
+      '组织者日历创建时间',// 6 - 组织者日历创建时间
+      '处理状态',          // 7 - 处理状态
+      '最后更新时间'       // 8 - 最后更新时间
     ];
     
     statusSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -2401,7 +2133,7 @@ function syncStatusSheet(statusSheet, courseCount) {
   if (currentRowCount < targetRowCount) {
     // 需要添加行
     const rowsToAdd = targetRowCount - currentRowCount;
-    const emptyRow = ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']; // 16列（包含记录ID和日历ID）
+    const emptyRow = ['', '', '', '', '', '', '', '', '']; // 9列（包含记录ID和组织者日历ID）
     const rows = [];
     for (let i = 0; i < rowsToAdd; i++) {
       rows.push(emptyRow);
@@ -2448,21 +2180,14 @@ function updateStatusRecord(statusSheet, course, result) {
     return undefined;
   };
   
-  // 获取各列的索引（使用表头名称而不是固定索引）
+  // 获取各列的索引（使用表头名称而不是固定索引）- 适配组织者模式
   const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
   const lessonNumberCol = getColumnIndex(['课次', 'lesson', 'lesson number', '课程次数']);
   const dateCol = getColumnIndex(['日期', 'date', '课程日期']);
   const tokenCol = getColumnIndex(['token', '令牌', '哈希']);
-  const teacherEmailStatusCol = getColumnIndex(['老师邮件状态', 'teacher email status', '老师邮件']);
-  const teacherEmailTimeCol = getColumnIndex(['老师邮件发送时间', 'teacher email time', '老师邮件时间']);
-  const teacherCalendarIdCol = getColumnIndex(['老师日历id', 'teacher calendar id', '老师日历']);
-  const teacherEventIdCol = getColumnIndex(['老师日历事件id', 'teacher event id', '老师事件id']);
-  const teacherEventTimeCol = getColumnIndex(['老师日历创建时间', 'teacher event time', '老师事件时间']);
-  const studentEmailStatusCol = getColumnIndex(['学生邮件状态', 'student email status', '学生邮件']);
-  const studentEmailTimeCol = getColumnIndex(['学生邮件发送时间', 'student email time', '学生邮件时间']);
-  const studentCalendarIdCol = getColumnIndex(['学生日历id', 'student calendar id', '学生日历']);
-  const studentEventIdCol = getColumnIndex(['学生日历事件id', 'student event id', '学生事件id']);
-  const studentEventTimeCol = getColumnIndex(['学生日历创建时间', 'student event time', '学生事件时间']);
+  const organizerCalendarIdCol = getColumnIndex(['组织者日历id', 'organizer calendar id', '组织者日历', 'organizer calendar', '管理员日历id', 'admin calendar id']);
+  const organizerEventIdCol = getColumnIndex(['组织者日历事件id', 'organizer event id', '组织者事件id', 'organizer event id', '管理员日历事件id', 'admin event id']);
+  const organizerEventTimeCol = getColumnIndex(['组织者日历创建时间', 'organizer event time', '组织者事件时间', 'organizer event time', '管理员日历创建时间', 'admin event time']);
   const statusCol = getColumnIndex(['处理状态', 'status', '状态']);
   const lastUpdateTimeCol = getColumnIndex(['最后更新时间', 'last update time', '更新时间']);
   
@@ -2490,105 +2215,58 @@ function updateStatusRecord(statusSheet, course, result) {
   
   // 保留已有的事件ID和日历ID（如果更新失败）
   // 确保从 existingRecord 中读取的值是字符串
-  let existingTeacherCalendarId = getExistingValue(teacherCalendarIdCol);
-  existingTeacherCalendarId = existingTeacherCalendarId && !(existingTeacherCalendarId instanceof Date) ? String(existingTeacherCalendarId).trim() : '';
-  let existingTeacherEventId = getExistingValue(teacherEventIdCol);
-  existingTeacherEventId = existingTeacherEventId && !(existingTeacherEventId instanceof Date) ? String(existingTeacherEventId).trim() : '';
-  let existingStudentCalendarId = getExistingValue(studentCalendarIdCol);
-  existingStudentCalendarId = existingStudentCalendarId && !(existingStudentCalendarId instanceof Date) ? String(existingStudentCalendarId).trim() : '';
-  let existingStudentEventId = getExistingValue(studentEventIdCol);
-  existingStudentEventId = existingStudentEventId && !(existingStudentEventId instanceof Date) ? String(existingStudentEventId).trim() : '';
+  let existingOrganizerCalendarId = getExistingValue(organizerCalendarIdCol);
+  existingOrganizerCalendarId = existingOrganizerCalendarId && !(existingOrganizerCalendarId instanceof Date) ? String(existingOrganizerCalendarId).trim() : '';
+  let existingOrganizerEventId = getExistingValue(organizerEventIdCol);
+  existingOrganizerEventId = existingOrganizerEventId && !(existingOrganizerEventId instanceof Date) ? String(existingOrganizerEventId).trim() : '';
   
   // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
   const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
-  if (existingTeacherEventId && invalidStatusTexts.includes(existingTeacherEventId)) {
-    Logger.log(`警告：老师事件ID包含状态文本，将被清空: "${existingTeacherEventId}"`);
-    existingTeacherEventId = '';
-  }
-  if (existingStudentEventId && invalidStatusTexts.includes(existingStudentEventId)) {
-    Logger.log(`警告：学生事件ID包含状态文本，将被清空: "${existingStudentEventId}"`);
-    existingStudentEventId = '';
+  if (existingOrganizerEventId && invalidStatusTexts.includes(existingOrganizerEventId)) {
+    Logger.log(`警告：组织者事件ID包含状态文本，将被清空: "${existingOrganizerEventId}"`);
+    existingOrganizerEventId = '';
   }
   
-  const teacherCalendarId = course.teacherCalendarId || existingTeacherCalendarId || '';
+  // 从config中获取组织者日历ID（如果course中没有）
+  const organizerCalendarId = course.organizerCalendarId || existingOrganizerCalendarId || '';
+  
   // 确保事件ID是字符串格式，且不是日期对象或状态文本
-  let teacherEventId = '';
-  if (result.teacherEmail.eventId) {
-    const eventId = result.teacherEmail.eventId;
+  let organizerEventId = '';
+  if (result.organizerEvent && result.organizerEvent.eventId) {
+    const eventId = result.organizerEvent.eventId;
     // 检查是否是日期对象
     if (eventId instanceof Date) {
-      Logger.log(`警告：老师事件ID是日期对象，将被忽略: ${eventId}`);
-      teacherEventId = existingTeacherEventId || '';
+      Logger.log(`警告：组织者事件ID是日期对象，将被忽略: ${eventId}`);
+      organizerEventId = existingOrganizerEventId || '';
     } else {
       const eventIdStr = String(eventId).trim();
       // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
-      const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
       if (invalidStatusTexts.includes(eventIdStr)) {
-        Logger.log(`警告：老师事件ID包含状态文本，将被忽略: "${eventIdStr}"`);
-        teacherEventId = existingTeacherEventId || '';
+        Logger.log(`警告：组织者事件ID包含状态文本，将被忽略: "${eventIdStr}"`);
+        organizerEventId = existingOrganizerEventId || '';
       } else {
-        teacherEventId = eventIdStr;
+        organizerEventId = eventIdStr;
       }
     }
   } else {
-    teacherEventId = existingTeacherEventId || '';
-  }
-  
-  const studentCalendarId = course.studentCalendarId || existingStudentCalendarId || '';
-  // 确保事件ID是字符串格式，且不是日期对象或状态文本
-  let studentEventId = '';
-  if (result.studentEmail.eventId) {
-    const eventId = result.studentEmail.eventId;
-    // 检查是否是日期对象
-    if (eventId instanceof Date) {
-      Logger.log(`警告：学生事件ID是日期对象，将被忽略: ${eventId}`);
-      studentEventId = existingStudentEventId || '';
-    } else {
-      const eventIdStr = String(eventId).trim();
-      // 验证事件ID格式：如果事件ID是"已发送"或其他状态文本，说明是错误的数据，应该清空
-      const invalidStatusTexts = ['已发送', '未发送', '失败', '部分失败', '已完成', '处理中'];
-      if (invalidStatusTexts.includes(eventIdStr)) {
-        Logger.log(`警告：学生事件ID包含状态文本，将被忽略: "${eventIdStr}"`);
-        studentEventId = existingStudentEventId || '';
-      } else {
-        studentEventId = eventIdStr;
-      }
-    }
-  } else {
-    studentEventId = existingStudentEventId || '';
+    organizerEventId = existingOrganizerEventId || '';
   }
   
   // 如果事件ID存在，更新创建时间；如果是新创建的，使用当前时间；如果是已有的，保留原时间
-  let teacherEventTime = '';
-  let studentEventTime = '';
+  let organizerEventTime = '';
   
-  if (result.teacherEmail.eventId && !(result.teacherEmail.eventId instanceof Date)) {
+  if (result.organizerEvent && result.organizerEvent.eventId && !(result.organizerEvent.eventId instanceof Date)) {
     // 新创建或更新的事件
-    teacherEventTime = nowStr;
-  } else if (existingRecord && existingTeacherEventId) {
+    organizerEventTime = nowStr;
+  } else if (existingRecord && existingOrganizerEventId) {
     // 保留原有的创建时间
-    const existingTime = getExistingValue(teacherEventTimeCol);
+    const existingTime = getExistingValue(organizerEventTimeCol);
     if (existingTime instanceof Date) {
       // 如果是日期对象，格式化为字符串
       const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
-      teacherEventTime = Utilities.formatDate(existingTime, timezone, 'yyyy-MM-dd HH:mm:ss');
+      organizerEventTime = Utilities.formatDate(existingTime, timezone, 'yyyy-MM-dd HH:mm:ss');
     } else if (existingTime) {
-      teacherEventTime = String(existingTime).trim();
-    }
-  }
-  
-  if (result.studentEmail.eventId && !(result.studentEmail.eventId instanceof Date)) {
-    // 新创建或更新的事件
-    studentEventTime = nowStr;
-  } else if (existingRecord && existingStudentEventId) {
-    // 保留原有的创建时间
-    const existingTime = getExistingValue(studentEventTimeCol);
-    if (existingTime instanceof Date) {
-      // 如果是日期对象，格式化为字符串
-      const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
-      studentEventTime = Utilities.formatDate(existingTime, timezone, 'yyyy-MM-dd HH:mm:ss');
-    } else if (existingTime) {
-      studentEventTime = String(existingTime).trim();
+      organizerEventTime = String(existingTime).trim();
     }
   }
   
@@ -2604,8 +2282,7 @@ function updateStatusRecord(statusSheet, course, result) {
   // 获取所有列索引，确保列存在
   const allColumns = [
     recordIdCol, lessonNumberCol, dateCol, tokenCol,
-    teacherEmailStatusCol, teacherEmailTimeCol, teacherCalendarIdCol, teacherEventIdCol, teacherEventTimeCol,
-    studentEmailStatusCol, studentEmailTimeCol, studentCalendarIdCol, studentEventIdCol, studentEventTimeCol,
+    organizerCalendarIdCol, organizerEventIdCol, organizerEventTimeCol,
     statusCol, lastUpdateTimeCol
   ];
   
@@ -2621,24 +2298,9 @@ function updateStatusRecord(statusSheet, course, result) {
   if (lessonNumberCol !== undefined) rowData[lessonNumberCol] = course.lessonNumber;
   if (dateCol !== undefined) rowData[dateCol] = dateStr;
   if (tokenCol !== undefined) rowData[tokenCol] = token;
-  if (teacherEmailStatusCol !== undefined) {
-    rowData[teacherEmailStatusCol] = result.teacherEmail.sent ? '已发送' : (result.teacherEmail.error || (existingRecord ? getExistingValue(teacherEmailStatusCol) : '未发送'));
-  }
-  if (teacherEmailTimeCol !== undefined) {
-    rowData[teacherEmailTimeCol] = result.teacherEmail.sent ? nowStr : (existingRecord ? getExistingValue(teacherEmailTimeCol) : '');
-  }
-  if (teacherCalendarIdCol !== undefined) rowData[teacherCalendarIdCol] = String(teacherCalendarId || '');
-  if (teacherEventIdCol !== undefined) rowData[teacherEventIdCol] = String(teacherEventId || '');
-  if (teacherEventTimeCol !== undefined) rowData[teacherEventTimeCol] = String(teacherEventTime || '');
-  if (studentEmailStatusCol !== undefined) {
-    rowData[studentEmailStatusCol] = result.studentEmail.sent ? '已发送' : (result.studentEmail.error || (existingRecord ? getExistingValue(studentEmailStatusCol) : '未发送'));
-  }
-  if (studentEmailTimeCol !== undefined) {
-    rowData[studentEmailTimeCol] = result.studentEmail.sent ? nowStr : (existingRecord ? getExistingValue(studentEmailTimeCol) : '');
-  }
-  if (studentCalendarIdCol !== undefined) rowData[studentCalendarIdCol] = String(studentCalendarId || '');
-  if (studentEventIdCol !== undefined) rowData[studentEventIdCol] = String(studentEventId || '');
-  if (studentEventTimeCol !== undefined) rowData[studentEventTimeCol] = String(studentEventTime || '');
+  if (organizerCalendarIdCol !== undefined) rowData[organizerCalendarIdCol] = String(organizerCalendarId || '');
+  if (organizerEventIdCol !== undefined) rowData[organizerEventIdCol] = String(organizerEventId || '');
+  if (organizerEventTimeCol !== undefined) rowData[organizerEventTimeCol] = String(organizerEventTime || '');
   if (statusCol !== undefined) rowData[statusCol] = result.status;
   if (lastUpdateTimeCol !== undefined) rowData[lastUpdateTimeCol] = nowStr;
   
@@ -2646,11 +2308,6 @@ function updateStatusRecord(statusSheet, course, result) {
   statusSheet.getRange(rowIndex, 1, 1, totalCols).setValues([rowData]);
 }
 
-// ==================== 工具函数 ====================
-
-/**
- * 解析日期时间
- */
 /**
  * 解析日期时间
  * @param {Date|string} dateInput - 日期输入
@@ -2736,33 +2393,6 @@ function parseDateTime(dateInput, timeInput, timezone) {
 }
 
 /**
- * 获取时区偏移量（相对于 UTC，单位：分钟）
- * @param {string} timezone - 时区标识符（如 Asia/Shanghai）
- * @returns {number} 时区偏移量（分钟）
- */
-function getTimezoneOffset(timezone) {
-  try {
-    const now = new Date();
-    // 使用 Utilities.formatDate 来获取指定时区的当前时间
-    const localTimeStr = Utilities.formatDate(now, timezone, 'yyyy-MM-dd HH:mm:ss');
-    const utcTimeStr = Utilities.formatDate(now, 'UTC', 'yyyy-MM-dd HH:mm:ss');
-    
-    // 解析时间字符串并计算差值
-    const localTime = new Date(localTimeStr.replace(' ', 'T'));
-    const utcTime = new Date(utcTimeStr.replace(' ', 'T'));
-    
-    // 计算偏移量（分钟）
-    const offset = (localTime.getTime() - utcTime.getTime()) / 60000;
-    
-    return offset;
-  } catch (error) {
-    Logger.log(`获取时区偏移量失败: ${timezone} - ${error.message}`);
-    // 如果失败，返回 0（UTC）
-    return 0;
-  }
-}
-
-/**
  * 格式化日期显示
  */
 function formatDate(dateInput) {
@@ -2788,38 +2418,3 @@ function formatDate(dateInput) {
     return String(dateInput);
   }
 }
-
-// ==================== 测试函数 ====================
-
-/**
- * 测试函数 - 处理单条记录
- */
-function testSingleRecord() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const statusSheetName = CONFIG.STATUS_SHEET_PREFIX + CONFIG.MAIN_SHEET_NAME;
-  ensureStatusSheet(spreadsheet, statusSheetName);
-  
-  const mainSheet = spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME);
-  const courses = readCourseData(mainSheet);
-  
-  if (courses.length > 0) {
-    const statusSheet = spreadsheet.getSheetByName(statusSheetName);
-    const result = processCourse(courses[0], statusSheet);
-    Logger.log(JSON.stringify(result, null, 2));
-  } else {
-    Logger.log('没有找到课程数据');
-  }
-}
-
-/**
- * 测试函数 - 读取数据
- */
-function testReadData() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  const mainSheet = spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME);
-  const courses = readCourseData(mainSheet);
-  Logger.log(`读取到 ${courses.length} 条记录`);
-  Logger.log(JSON.stringify(courses, null, 2));
-}
-
-

@@ -32,8 +32,6 @@
 | 学生邮箱 | 学生邮箱地址 | jingyaxiegm@gmail.com |
 | 开始时间 | 课程开始时间 | 10:00 |
 | 结束时间 | 课程结束时间 | 11:30 |
-| 老师日历授权ID | 老师日历账户 | jovixiao2022@gmail.com |
-| 学生日历授权ID | 学生日历账户 | jingyaxiegm@gmail.com |
 
 ### 3. 配置脚本参数（可选）
 
