@@ -552,11 +552,17 @@ function processSheet(spreadsheet, sheetName, config) {
     
     // 处理每条记录
     const results = [];
-    for (const course of toProcess) {
+    for (let i = 0; i < toProcess.length; i++) {
+      const course = toProcess[i];
       try {
         const result = processCourse(course, statusSheet);
         results.push(result);
         Logger.log(`[${sheetName}] 处理完成: ${course.lessonNumber} - ${result.status}`);
+        
+        // 如果不是最后一条记录，添加延迟，避免连续处理多条记录时触发速率限制
+        if (i < toProcess.length - 1) {
+          addOperationDelay();
+        }
       } catch (error) {
         Logger.log(`[${sheetName}] 处理失败: ${course.lessonNumber} - ${error.message}`);
         results.push({
@@ -564,6 +570,11 @@ function processSheet(spreadsheet, sheetName, config) {
           status: '失败',
           error: error.message
         });
+        
+        // 即使失败，也添加延迟，避免连续处理时触发速率限制
+        if (i < toProcess.length - 1) {
+          addOperationDelay();
+        }
       }
     }
     
@@ -834,62 +845,115 @@ function processCourse(course, statusSheet) {
   };
   
   try {
-    // 如果有旧记录（日期变化），先删除旧日期的日历事件
+    // 获取已有的事件ID和token信息（在删除旧记录之前获取，以便判断是否应该更新）
+    const existingInfo = getExistingEventIds(statusSheet, course);
+    
+    // 如果有旧记录（日期变化），优先尝试更新现有事件，而不是删除后重新创建
     if (course._oldRecords && course._oldRecords.length > 0) {
-      for (const oldRecord of course._oldRecords) {
-        // 尝试删除老师日历事件（使用旧记录中的日历ID）
-        if (oldRecord.teacherEventId) {
-          try {
-            if (oldRecord.teacherCalendarId) {
-              // 如果有日历ID，直接删除
-              deleteCalendarEvent(oldRecord.teacherCalendarId, oldRecord.teacherEventId);
-              Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId} (日历: ${oldRecord.teacherCalendarId})`);
-            } else {
-              // 如果没有日历ID，尝试通过事件ID删除（遍历所有日历）
-              deleteCalendarEventById(oldRecord.teacherEventId);
-              Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
+      // 检查是否有相同记录ID的旧记录（说明是同一条记录，只是日期变化了）
+      const sameRecordIdOldRecord = course._oldRecords.find(oldRecord => 
+        oldRecord.recordId && course.recordId && oldRecord.recordId === course.recordId
+      );
+      
+      if (sameRecordIdOldRecord) {
+        // 如果是同一条记录（记录ID相同），说明只是日期变化，应该更新现有事件而不是删除后重新创建
+        Logger.log(`检测到同一条记录的日期变化（记录ID: ${course.recordId}），将更新现有事件而不是删除后重新创建`);
+        
+        // 将旧记录的事件ID传递给existingInfo，以便后续更新时使用
+        if (sameRecordIdOldRecord.teacherEventId && !existingInfo.teacherEventId) {
+          existingInfo.teacherEventId = sameRecordIdOldRecord.teacherEventId;
+          Logger.log(`使用旧记录的老师事件ID进行更新: ${sameRecordIdOldRecord.teacherEventId}`);
+        }
+        if (sameRecordIdOldRecord.studentEventId && !existingInfo.studentEventId) {
+          existingInfo.studentEventId = sameRecordIdOldRecord.studentEventId;
+          Logger.log(`使用旧记录的学生事件ID进行更新: ${sameRecordIdOldRecord.studentEventId}`);
+        }
+        
+        // 删除其他不同记录ID的旧记录（这些是真正的旧记录，需要删除）
+        const otherOldRecords = course._oldRecords.filter(oldRecord => 
+          !oldRecord.recordId || oldRecord.recordId !== course.recordId
+        );
+        
+        if (otherOldRecords.length > 0) {
+          Logger.log(`删除 ${otherOldRecords.length} 条其他旧记录`);
+          for (const oldRecord of otherOldRecords) {
+            // 尝试删除老师日历事件
+            if (oldRecord.teacherEventId) {
+              try {
+                if (oldRecord.teacherCalendarId) {
+                  deleteCalendarEvent(oldRecord.teacherCalendarId, oldRecord.teacherEventId);
+                  Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
+                } else {
+                  deleteCalendarEventById(oldRecord.teacherEventId);
+                  Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
+                }
+                addOperationDelay();
+              } catch (error) {
+                Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
+              }
             }
-            // 添加延迟，避免速率限制
-            addOperationDelay();
-          } catch (error) {
-            Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
-            // 如果是速率限制错误，记录详细信息
-            if (isRateLimitError(error)) {
-              Logger.log(`⚠️ 删除旧老师日历事件遇到速率限制，可能需要稍后重试`);
+            
+            // 尝试删除学生日历事件
+            if (oldRecord.studentEventId) {
+              try {
+                if (oldRecord.studentCalendarId) {
+                  deleteCalendarEvent(oldRecord.studentCalendarId, oldRecord.studentEventId);
+                  Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
+                } else {
+                  deleteCalendarEventById(oldRecord.studentEventId);
+                  Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
+                }
+                addOperationDelay();
+              } catch (error) {
+                Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
+              }
+            }
+          }
+          
+          // 删除其他旧记录的状态记录
+          deleteOldStatusRecords(statusSheet, otherOldRecords);
+        }
+      } else {
+        // 如果没有相同记录ID的旧记录，说明是真正的旧记录，需要删除
+        Logger.log(`检测到 ${course._oldRecords.length} 条旧记录，将删除这些旧记录`);
+        for (const oldRecord of course._oldRecords) {
+          // 尝试删除老师日历事件
+          if (oldRecord.teacherEventId) {
+            try {
+              if (oldRecord.teacherCalendarId) {
+                deleteCalendarEvent(oldRecord.teacherCalendarId, oldRecord.teacherEventId);
+                Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
+              } else {
+                deleteCalendarEventById(oldRecord.teacherEventId);
+                Logger.log(`删除旧老师日历事件成功: ${oldRecord.teacherEventId}`);
+              }
+              addOperationDelay();
+            } catch (error) {
+              Logger.log(`删除旧老师日历事件失败: ${oldRecord.teacherEventId} - ${error.message}`);
+            }
+          }
+          
+          // 尝试删除学生日历事件
+          if (oldRecord.studentEventId) {
+            try {
+              if (oldRecord.studentCalendarId) {
+                deleteCalendarEvent(oldRecord.studentCalendarId, oldRecord.studentEventId);
+                Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
+              } else {
+                deleteCalendarEventById(oldRecord.studentEventId);
+                Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
+              }
+              addOperationDelay();
+            } catch (error) {
+              Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
             }
           }
         }
         
-        // 尝试删除学生日历事件（使用旧记录中的日历ID）
-        if (oldRecord.studentEventId) {
-          try {
-            if (oldRecord.studentCalendarId) {
-              // 如果有日历ID，直接删除
-              deleteCalendarEvent(oldRecord.studentCalendarId, oldRecord.studentEventId);
-              Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId} (日历: ${oldRecord.studentCalendarId})`);
-            } else {
-              // 如果没有日历ID，尝试通过事件ID删除（遍历所有日历）
-              deleteCalendarEventById(oldRecord.studentEventId);
-              Logger.log(`删除旧学生日历事件成功: ${oldRecord.studentEventId}`);
-            }
-            // 添加延迟，避免速率限制
-            addOperationDelay();
-          } catch (error) {
-            Logger.log(`删除旧学生日历事件失败: ${oldRecord.studentEventId} - ${error.message}`);
-            // 如果是速率限制错误，记录详细信息
-            if (isRateLimitError(error)) {
-              Logger.log(`⚠️ 删除旧学生日历事件遇到速率限制，可能需要稍后重试`);
-            }
-          }
-        }
+        // 删除旧状态记录
+        deleteOldStatusRecords(statusSheet, course._oldRecords);
       }
-      
-      // 删除旧状态记录
-      deleteOldStatusRecords(statusSheet, course._oldRecords);
     }
-    
-    // 获取已有的事件ID和token信息
-    const existingInfo = getExistingEventIds(statusSheet, course);
     
     // 判断是否需要重新发送邮件（关键信息有变化时）
     const needsResendEmail = existingInfo.hasChanges;
@@ -1712,7 +1776,12 @@ function findOldRecordsByLessonNumber(statusSheet, lessonNumber, currentDate, ti
         String(rowDate);
       
       if (rowDateStr !== currentDateStr) {
+        // 获取记录ID（如果存在）
+        const recordIdCol = getColumnIndex(['记录id', 'record id', '记录id', 'recordid', 'id']);
+        const recordId = getValue(row, recordIdCol);
+        
         oldRecords.push({
+          recordId: recordId, // 添加记录ID，用于判断是否是同一条记录
           lessonNumber: rowLessonNumber,
           date: rowDate,
           teacherCalendarId: getValue(row, teacherCalendarIdCol),
