@@ -16,6 +16,69 @@
  * - 配置表（_SheetConfig）：管理要处理的Sheet列表和配置信息
  * - 状态表（_StatusLog_{SheetName}）：记录每条课程的处理状态和事件ID
  * - 主课程表：包含课程信息（课次、日期、课程内容、时间、老师、学生）
+ * 
+ * ==================== 作为库使用 ====================
+ * 
+ * 1. 获取脚本ID：
+ *    - 在 Google Apps Script 编辑器中，点击"文件" → "项目属性"
+ *    - 在"项目属性"对话框中，找到"脚本 ID"字段
+ *    - 复制该脚本ID，这是库的唯一标识符
+ * 
+ * 2. 创建版本（可选）：
+ *    - 点击"文件" → "管理版本"
+ *    - 输入版本说明（例如，"初始版本"）
+ *    - 点击"保存新版本"
+ *    - 版本号会自动生成（1, 2, 3...）
+ *    - 如果不创建版本，可以使用"开发模式"（自动使用最新代码）
+ * 
+ * 3. 在新表格中使用：
+ *    a. 在 Google Sheets 中打开新表格
+ *    b. 点击"扩展程序" → "Apps Script"
+ *    c. 点击"资源" → "库" → 添加库
+ *    d. 粘贴库的脚本ID，点击"查找"或"添加"
+ *    e. 在"标识符"字段中，输入名称（如 CalendarSyncLib）
+ *    f. 选择版本（"开发模式"或固定版本号）
+ *    g. 点击"添加"或"保存"
+ *    h. 创建以下代码（必须包含菜单项包装函数）：
+ * 
+ *       function onOpen() {
+ *         CalendarSyncLib.createMenu();
+ *       }
+ * 
+ *       // 菜单项函数必须在用户表格中定义（包装函数）
+ *       function menuRunSync() {
+ *         try {
+ *           const ui = SpreadsheetApp.getUi();
+ *           const response = ui.alert('确认执行同步', '是否继续？', ui.ButtonSet.YES_NO);
+ *           if (response === ui.Button.YES) {
+ *             CalendarSyncLib.main();
+ *             ui.alert('同步完成', '课程同步已完成', ui.ButtonSet.OK);
+ *           }
+ *         } catch (error) {
+ *           SpreadsheetApp.getUi().alert('执行错误', error.message, ui.ButtonSet.OK);
+ *         }
+ *       }
+ * 
+ *       function menuViewConfig() { CalendarSyncLib.menuViewConfig(); }
+ *       function menuViewStatus() { CalendarSyncLib.menuViewStatus(); }
+ *       function menuAbout() { CalendarSyncLib.menuAbout(); }
+ * 
+ *       // 可选：手动执行同步
+ *       function runSync() {
+ *         CalendarSyncLib.main();
+ *       }
+ * 
+ * 4. 可用的库函数：
+ *    - createMenu() - 创建自定义菜单
+ *    - main() - 执行同步（主函数）
+ *    - menuRunSync() - 菜单项：执行同步
+ *    - menuViewConfig() - 菜单项：查看配置
+ *    - menuViewStatus() - 菜单项：查看状态表
+ *    - menuAbout() - 菜单项：关于
+ * 
+ * 4. 权限说明：
+ *    - 库需要请求必要的权限（Calendar、Sheets、Mail 等）
+ *    - 用户首次使用时需要授权
  */
 
 // ==================== 配置常量 ====================
@@ -48,9 +111,16 @@ const CONFIG = {
 // ==================== 菜单功能 ====================
 
 /**
- * 当打开表格时自动创建自定义菜单
+ * 创建自定义菜单（库模式）
+ * 此函数可以被外部调用，用于在新表格中创建菜单
+ * 
+ * @example
+ * // 在新表格中使用：
+ * function onOpen() {
+ *   CalendarSyncLib.createMenu();
+ * }
  */
-function onOpen() {
+function createMenu() {
   const ui = SpreadsheetApp.getUi();
   
   // 创建自定义菜单
@@ -62,6 +132,14 @@ function onOpen() {
     .addSeparator()
     .addItem('ℹ️ 关于', 'menuAbout')
     .addToUi();
+}
+
+/**
+ * 当打开表格时自动创建自定义菜单（向后兼容）
+ * 如果作为库使用，此函数不会自动执行，需要在用户表格中创建 onOpen() 调用 createMenu()
+ */
+function onOpen() {
+  createMenu();
 }
 
 /**
