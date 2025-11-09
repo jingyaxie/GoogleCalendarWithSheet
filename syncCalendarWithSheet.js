@@ -69,32 +69,63 @@ function onOpen() {
  */
 function menuRunSync() {
   try {
+    Logger.log('菜单执行同步：开始');
     const ui = SpreadsheetApp.getUi();
+    
+    Logger.log('菜单执行同步：显示确认对话框');
     const response = ui.alert(
       '确认执行同步',
       '这将处理所有配置的课程表，在组织者日历上创建事件并邀请老师和学生。\n\n是否继续？',
       ui.ButtonSet.YES_NO
     );
     
+    Logger.log('菜单执行同步：用户响应 = ' + response);
+    
     if (response === ui.Button.YES) {
-      // 执行主函数
-      main();
+      Logger.log('菜单执行同步：用户确认，开始执行 main()');
       
-      // 显示完成提示
-      ui.alert(
-        '同步完成',
-        '课程同步已完成，请查看执行日志了解详细信息。',
-        ui.ButtonSet.OK
-      );
+      try {
+        // 执行主函数
+        main();
+        
+        Logger.log('菜单执行同步：main() 执行完成，显示完成提示');
+        // 显示完成提示
+        ui.alert(
+          '同步完成',
+          '课程同步已完成，请查看执行日志了解详细信息。',
+          ui.ButtonSet.OK
+        );
+      } catch (mainError) {
+        Logger.log('菜单执行同步：main() 执行失败: ' + mainError.message);
+        if (mainError.stack) {
+          Logger.log('菜单执行同步：main() 错误堆栈: ' + mainError.stack);
+        }
+        throw mainError; // 重新抛出，让外层 catch 处理
+      }
+    } else {
+      Logger.log('菜单执行同步：用户取消');
     }
   } catch (error) {
-    const ui = SpreadsheetApp.getUi();
-    ui.alert(
-      '执行错误',
-      '同步过程中发生错误：\n' + error.message,
-      ui.ButtonSet.OK
-    );
-    Logger.log('菜单执行同步错误: ' + error.message);
+    Logger.log('菜单执行同步：捕获到错误');
+    Logger.log('错误类型: ' + (error.name || 'Unknown'));
+    Logger.log('错误消息: ' + (error.message || error.toString() || '未知错误'));
+    if (error.stack) {
+      Logger.log('错误堆栈: ' + error.stack);
+    }
+    
+    try {
+      const ui = SpreadsheetApp.getUi();
+      const errorMessage = error.message || error.toString() || '未知错误';
+      const errorStack = error.stack ? '\n\n错误堆栈:\n' + error.stack.substring(0, 500) : ''; // 限制堆栈长度
+      ui.alert(
+        '执行错误',
+        '同步过程中发生错误：\n' + errorMessage + errorStack + '\n\n请查看执行日志了解详细信息。',
+        ui.ButtonSet.OK
+      );
+    } catch (uiError) {
+      // 如果 UI 操作也失败，至少记录到日志
+      Logger.log('无法显示错误对话框: ' + uiError.message);
+    }
   }
 }
 
@@ -267,6 +298,26 @@ function menuAbout() {
   ui.showModalDialog(html, '关于');
 }
 
+// ==================== 工具函数 ====================
+
+/**
+ * 清理表头文本，去除格式和不可见字符
+ * @param {string} text - 原始文本
+ * @returns {string} 清理后的文本
+ */
+function cleanHeaderText(text) {
+  if (!text) return '';
+  // 转换为字符串
+  let cleaned = String(text);
+  // 去除所有空白字符（包括空格、制表符、换行符等）
+  cleaned = cleaned.replace(/\s+/g, '');
+  // 去除不可见字符（零宽字符等）
+  cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  // 转换为小写
+  cleaned = cleaned.toLowerCase();
+  return cleaned;
+}
+
 // ==================== 主函数 ====================
 
 /**
@@ -276,10 +327,19 @@ function menuAbout() {
 function main() {
   try {
     Logger.log('通知\t已开始执行');
+    Logger.log('main() 函数开始执行');
+    
+    Logger.log('获取当前表格对象');
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) {
+      throw new Error('无法获取当前表格对象，请确保在 Google 表格中运行此脚本');
+    }
+    Logger.log('表格对象获取成功: ' + spreadsheet.getName());
     
     // 从配置表读取要处理的 sheet 配置信息
+    Logger.log('开始读取配置表');
     const sheetConfigMap = readSheetConfig(spreadsheet);
+    Logger.log('配置表读取完成');
     
     if (sheetConfigMap.size === 0) {
       Logger.log('警告：没有找到需要处理的 sheet，请检查配置表 _SheetConfig');
@@ -345,8 +405,14 @@ function main() {
     Logger.log('通知\t执行完毕');
     
   } catch (error) {
-    Logger.log(`主函数执行失败: ${error.message}`);
-    Logger.log(`错误堆栈: ${error.stack}`);
+    const errorMessage = error.message || error.toString() || '未知错误';
+    Logger.log(`主函数执行失败: ${errorMessage}`);
+    if (error.stack) {
+      Logger.log(`错误堆栈: ${error.stack}`);
+    }
+    // 记录更详细的错误信息
+    Logger.log(`错误类型: ${error.name || 'Unknown'}`);
+    Logger.log(`错误详情: ${JSON.stringify(error, null, 2)}`);
     throw error;
   }
 }
@@ -357,184 +423,261 @@ function main() {
  * @returns {Map<string, Object>} Sheet 配置信息映射表，key为Sheet名称，value为配置对象
  */
 function readSheetConfig(spreadsheet) {
-  // 先列出所有 sheet，用于调试
-  const allSheets = spreadsheet.getSheets();
-  const allSheetNames = allSheets.map(s => s.getName());
-  Logger.log(`当前表格中的所有 Sheet: ${allSheetNames.join(', ')}`);
-  Logger.log(`正在查找配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
-  
-  const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
-  
-  // 如果配置表不存在，直接报错
-  if (!configSheet) {
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 不存在，请先创建配置表`);
-  }
-  
-  Logger.log(`✓ 找到配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
-  
-  // 读取配置表数据
-  const dataRange = configSheet.getDataRange();
-  const values = dataRange.getValues();
-  
-  Logger.log(`配置表数据行数: ${values.length}`);
-  
-  if (values.length < 2) {
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 没有数据（只有表头），请至少添加一行数据`);
-  }
-  
-  // 解析表头
-  const headers = values[0];
-  Logger.log(`配置表表头: ${headers.join(', ')}`);
-  
-  const headerMap = {};
-  headers.forEach((header, index) => {
-    const normalizedHeader = String(header).trim().toLowerCase();
-    headerMap[normalizedHeader] = index;
-  });
-  
-  // 支持多种表头名称
-  const sheetNameHeader = headerMap['sheet名称'] || 
-                          headerMap['sheet name'] || 
-                          headerMap['名称'] ||
-                          headerMap['name'] ||
-                          headerMap['sheet'] ||
-                          headerMap['表名'];
-  
-  const enabledHeader = headerMap['启用状态'] || 
-                        headerMap['enabled'] || 
-                        headerMap['启用'] || 
-                        headerMap['状态'] || 
-                        headerMap['status'] || 
-                        headerMap['是否启用'] ||
-                        headerMap['enable'] ||
-                        headerMap['active'];
-  
-  // 组织者日历ID（必需）
-  const organizerCalendarIdHeader = headerMap['组织者日历id'] || 
-                                     headerMap['organizer calendar id'] || 
-                                     headerMap['组织者日历'] ||
-                                     headerMap['organizer calendar'] ||
-                                     headerMap['组织者日历授权id'] ||
-                                     headerMap['organizer calendar id'] ||
-                                     headerMap['管理员日历id'] ||
-                                     headerMap['admin calendar id'] ||
-                                     headerMap['管理员日历'] ||
-                                     headerMap['admin calendar'];
-  
-  const teacherEmailHeader = headerMap['老师邮箱'] || 
-                             headerMap['teacher email'] || 
-                             headerMap['老师email'] ||
-                             headerMap['teacheremail'] ||
-                             headerMap['老师邮件'];
-  
-  const studentEmailHeader = headerMap['学生邮箱'] || 
-                             headerMap['student email'] || 
-                             headerMap['学生email'] ||
-                             headerMap['studentemail'] ||
-                             headerMap['学生邮件'];
-  
-  const timezoneHeader = headerMap['时区'] || 
-                         headerMap['timezone'] || 
-                         headerMap['time zone'] ||
-                         headerMap['tz'];
-  
-  const reminderMinutesHeader = headerMap['提醒时间'] || 
-                                headerMap['reminder minutes'] || 
-                                headerMap['reminder'] ||
-                                headerMap['提醒'] ||
-                                headerMap['邮件提醒'] ||
-                                headerMap['email reminder'] ||
-                                headerMap['提前提醒'] ||
-                                headerMap['minutes before'];
-  
-  // 检查必需字段
-  if (sheetNameHeader === undefined) {
-    const availableHeaders = Object.keys(headerMap).join(', ');
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保包含 Sheet 名称的列，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`);
-  }
-  
-  if (organizerCalendarIdHeader === undefined) {
-    throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"组织者日历ID"列。\n当前表头: ${headers.join(', ')}\n请确保包含组织者日历ID的列，支持的列名：组织者日历ID、Organizer Calendar ID、组织者日历、管理员日历ID等`);
-  }
-  
-  // 读取启用的 Sheet 配置信息
-  const sheetConfigMap = new Map();
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const sheetName = row[sheetNameHeader];
+  try {
+    Logger.log('readSheetConfig: 开始读取配置表');
     
-    // 跳过空行
-    if (!sheetName || String(sheetName).trim() === '') {
-      continue;
+    // 先列出所有 sheet，用于调试
+    Logger.log('readSheetConfig: 获取所有 Sheet');
+    const allSheets = spreadsheet.getSheets();
+    const allSheetNames = allSheets.map(s => s.getName());
+    Logger.log(`当前表格中的所有 Sheet: ${allSheetNames.join(', ')}`);
+    Logger.log(`正在查找配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
+    
+    Logger.log('readSheetConfig: 查找配置表 Sheet');
+    const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
+    
+    // 如果配置表不存在，直接报错
+    if (!configSheet) {
+      const errorMsg = `配置表 ${CONFIG.CONFIG_SHEET_NAME} 不存在，请先创建配置表。当前表格中的 Sheet: ${allSheetNames.join(', ')}`;
+      Logger.log('readSheetConfig: 错误 - ' + errorMsg);
+      throw new Error(errorMsg);
     }
     
-    const sheetNameTrimmed = String(sheetName).trim();
+    Logger.log(`✓ 找到配置表: ${CONFIG.CONFIG_SHEET_NAME}`);
     
-    // 检查启用状态
-    if (enabledHeader !== undefined) {
-      const enabled = row[enabledHeader];
-      const enabledStr = String(enabled).trim().toLowerCase();
-      // 支持多种表示方式：是/Yes/1/true/启用
-      if (enabledStr !== '是' && enabledStr !== 'yes' && enabledStr !== '1' && enabledStr !== 'true' && enabledStr !== '启用' && enabledStr !== 'enabled') {
-        Logger.log(`跳过未启用的 Sheet: ${sheetNameTrimmed}`);
+    // 读取配置表数据
+    Logger.log('readSheetConfig: 读取配置表数据');
+    const dataRange = configSheet.getDataRange();
+    // 使用 getDisplayValues() 获取显示值，避免格式问题
+    const values = dataRange.getDisplayValues();
+    
+    Logger.log(`配置表数据行数: ${values.length}`);
+    
+    if (values.length < 2) {
+      const errorMsg = `配置表 ${CONFIG.CONFIG_SHEET_NAME} 没有数据（只有表头），请至少添加一行数据`;
+      Logger.log('readSheetConfig: 错误 - ' + errorMsg);
+      throw new Error(errorMsg);
+    }
+    
+    // 解析表头 - 清理格式和不可见字符
+    Logger.log('readSheetConfig: 解析表头');
+    const headers = values[0];
+    Logger.log(`配置表表头（原始）: ${headers.join(', ')}`);
+    
+    const headerMap = {};
+    headers.forEach((header, index) => {
+      // 先获取原始值
+      const rawHeader = String(header || '').trim();
+      // 清理后的表头（用于匹配）
+      const normalizedHeader = cleanHeaderText(rawHeader);
+      headerMap[normalizedHeader] = index;
+      // 同时存储原始表头（用于调试）
+      Logger.log(`  表头[${index}]: "${rawHeader}" -> 清理后: "${normalizedHeader}"`);
+    });
+    Logger.log('readSheetConfig: 表头映射完成');
+    Logger.log('headerMap 键: ' + Object.keys(headerMap).join(', '));
+    
+    // 支持多种表头名称（更宽松的匹配）
+    // 先尝试精确匹配（使用清理后的文本）
+    Logger.log('开始匹配 Sheet名称 列...');
+    
+    // 定义可能的匹配键（清理后的格式）
+    const possibleKeys = [
+      cleanHeaderText('Sheet名称'),
+      cleanHeaderText('Sheet Name'),
+      cleanHeaderText('名称'),
+      cleanHeaderText('Name'),
+      cleanHeaderText('Sheet'),
+      cleanHeaderText('表名')
+    ];
+    
+    let sheetNameHeader = undefined;
+    for (const key of possibleKeys) {
+      Logger.log(`尝试匹配: "${key}"`);
+      if (headerMap[key] !== undefined) {
+        sheetNameHeader = headerMap[key];
+        Logger.log(`✓ 找到匹配: "${key}" (索引: ${sheetNameHeader})`);
+        break;
+      }
+    }
+    
+    // 如果精确匹配失败，尝试模糊匹配（包含关键词）
+    if (sheetNameHeader === undefined) {
+      Logger.log('精确匹配失败，尝试模糊匹配...');
+      for (const [key, index] of Object.entries(headerMap)) {
+        // 检查是否包含关键词
+        if (key.includes('sheet') && (key.includes('名称') || key.includes('name'))) {
+          sheetNameHeader = index;
+          Logger.log(`找到匹配的表头: "${headers[index]}" (索引: ${index}, 键: "${key}")`);
+          break;
+        }
+        if (key === '名称' || key === 'name' || key === 'sheet' || key === '表名') {
+          sheetNameHeader = index;
+          Logger.log(`找到匹配的表头: "${headers[index]}" (索引: ${index}, 键: "${key}")`);
+          break;
+        }
+      }
+    }
+    
+    if (sheetNameHeader !== undefined) {
+      Logger.log(`✓ Sheet名称 列匹配成功: 索引 ${sheetNameHeader}, 表头: "${headers[sheetNameHeader]}"`);
+    } else {
+      Logger.log('✗ Sheet名称 列匹配失败');
+    }
+    
+    // 辅助函数：使用清理后的文本匹配表头
+    function findHeaderIndex(possibleNames) {
+      for (const name of possibleNames) {
+        const cleanedName = cleanHeaderText(name);
+        if (headerMap[cleanedName] !== undefined) {
+          return headerMap[cleanedName];
+        }
+      }
+      return undefined;
+    }
+    
+    const enabledHeader = findHeaderIndex([
+      '启用状态', 'enabled', '启用', '状态', 'status', '是否启用', 'enable', 'active'
+    ]);
+    
+    // 组织者日历ID（必需）
+    const organizerCalendarIdHeader = findHeaderIndex([
+      '组织者日历ID', '组织者日历id', 'organizer calendar id', '组织者日历', 
+      'organizer calendar', '组织者日历授权ID', '组织者日历授权id', 
+      '管理员日历ID', 'admin calendar id', '管理员日历', 'admin calendar'
+    ]);
+    
+    const teacherEmailHeader = findHeaderIndex([
+      '老师邮箱', 'teacher email', '老师email', 'teacheremail', '老师邮件'
+    ]);
+    
+    const studentEmailHeader = findHeaderIndex([
+      '学生邮箱', 'student email', '学生email', 'studentemail', '学生邮件'
+    ]);
+    
+    const timezoneHeader = findHeaderIndex([
+      '时区', 'timezone', 'time zone', 'tz'
+    ]);
+    
+    const reminderMinutesHeader = findHeaderIndex([
+      '提醒时间', 'reminder minutes', 'reminder', '提醒', 
+      '邮件提醒', 'email reminder', '提前提醒', 'minutes before'
+    ]);
+    
+    // 检查必需字段
+    if (sheetNameHeader === undefined) {
+      // 最后尝试：直接遍历 headerMap 查找包含关键词的键
+      Logger.log('最后尝试：遍历 headerMap 查找包含关键词的键...');
+      for (const [key, index] of Object.entries(headerMap)) {
+        Logger.log(`  检查键: "${key}" (索引: ${index})`);
+        if (key.includes('sheet') && (key.includes('名称') || key.includes('name'))) {
+          sheetNameHeader = index;
+          Logger.log(`  找到匹配的键: "${key}" (索引: ${index})`);
+          break;
+        }
+      }
+    }
+    
+    if (sheetNameHeader === undefined) {
+      const availableHeaders = Object.keys(headerMap).join(', ');
+      const errorMsg = `配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"Sheet名称"列。\n当前表头: ${headers.join(', ')}\n可用的表头键: ${availableHeaders}\n请确保包含 Sheet 名称的列，支持的列名：Sheet名称、Sheet Name、名称、Name、Sheet、表名等`;
+      Logger.log('错误: ' + errorMsg);
+      throw new Error(errorMsg);
+    }
+    
+    if (organizerCalendarIdHeader === undefined) {
+      throw new Error(`配置表 ${CONFIG.CONFIG_SHEET_NAME} 缺少"组织者日历ID"列。\n当前表头: ${headers.join(', ')}\n请确保包含组织者日历ID的列，支持的列名：组织者日历ID、Organizer Calendar ID、组织者日历、管理员日历ID等`);
+    }
+    
+    // 读取启用的 Sheet 配置信息
+    const sheetConfigMap = new Map();
+    for (let i = 1; i < values.length; i++) {
+      const row = values[i];
+      const sheetName = row[sheetNameHeader];
+      
+      // 跳过空行
+      if (!sheetName || String(sheetName).trim() === '') {
         continue;
       }
-    }
-    
-    // 验证 Sheet 是否存在
-    const sheet = spreadsheet.getSheetByName(sheetNameTrimmed);
-    if (!sheet) {
-      Logger.log(`警告：配置的 Sheet "${sheetNameTrimmed}" 不存在，已跳过`);
-      continue;
-    }
-    
-    // 读取组织者日历ID（必需）
-    const organizerCalendarId = row[organizerCalendarIdHeader] ? String(row[organizerCalendarIdHeader]).trim() : '';
-    if (!organizerCalendarId) {
-      Logger.log(`警告：组织者日历ID为空，跳过 Sheet: ${sheetNameTrimmed}`);
-      continue;
-    }
-    
-    // 读取提醒时间
-    let reminderMinutesStr = '';
-    if (reminderMinutesHeader !== undefined && row[reminderMinutesHeader] !== undefined && row[reminderMinutesHeader] !== null && row[reminderMinutesHeader] !== '') {
-      reminderMinutesStr = String(row[reminderMinutesHeader]).trim();
-    }
-    
-    let reminderMinutes = null;
-    if (reminderMinutesStr) {
-      const parsed = parseInt(reminderMinutesStr, 10);
-      if (!isNaN(parsed) && parsed > 0) {
-        reminderMinutes = parsed;
+      
+      const sheetNameTrimmed = String(sheetName).trim();
+      
+      // 检查启用状态
+      if (enabledHeader !== undefined) {
+        const enabled = row[enabledHeader];
+        const enabledStr = String(enabled).trim().toLowerCase();
+        // 支持多种表示方式：是/Yes/1/true/启用
+        if (enabledStr !== '是' && enabledStr !== 'yes' && enabledStr !== '1' && enabledStr !== 'true' && enabledStr !== '启用' && enabledStr !== 'enabled') {
+          Logger.log(`跳过未启用的 Sheet: ${sheetNameTrimmed}`);
+          continue;
+        }
       }
+      
+      // 验证 Sheet 是否存在
+      const sheet = spreadsheet.getSheetByName(sheetNameTrimmed);
+      if (!sheet) {
+        Logger.log(`警告：配置的 Sheet "${sheetNameTrimmed}" 不存在，已跳过`);
+        continue;
+      }
+      
+      // 读取组织者日历ID（必需）
+      const organizerCalendarId = row[organizerCalendarIdHeader] ? String(row[organizerCalendarIdHeader]).trim() : '';
+      if (!organizerCalendarId) {
+        Logger.log(`警告：组织者日历ID为空，跳过 Sheet: ${sheetNameTrimmed}`);
+        continue;
+      }
+      
+      // 读取提醒时间
+      let reminderMinutesStr = '';
+      if (reminderMinutesHeader !== undefined && row[reminderMinutesHeader] !== undefined && row[reminderMinutesHeader] !== null && row[reminderMinutesHeader] !== '') {
+        reminderMinutesStr = String(row[reminderMinutesHeader]).trim();
+      }
+      
+      let reminderMinutes = null;
+      if (reminderMinutesStr) {
+        const parsed = parseInt(reminderMinutesStr, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          reminderMinutes = parsed;
+        }
+      }
+      
+      const config = {
+        sheetName: sheetNameTrimmed,
+        organizerCalendarId: organizerCalendarId,
+        teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
+        studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
+        timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE,
+        reminderMinutes: reminderMinutes
+      };
+      
+      // 如果时区为空，使用默认时区
+      if (!config.timezone) {
+        config.timezone = CONFIG.TIMEZONE;
+      }
+      
+      Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
+      Logger.log(`    组织者日历ID: ${config.organizerCalendarId}`);
+      Logger.log(`    老师邮箱: ${config.teacherEmail}`);
+      Logger.log(`    学生邮箱: ${config.studentEmail}`);
+      Logger.log(`    时区: ${config.timezone}`);
+      Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
+      
+      sheetConfigMap.set(sheetNameTrimmed, config);
     }
-    
-    const config = {
-      sheetName: sheetNameTrimmed,
-      organizerCalendarId: organizerCalendarId,
-      teacherEmail: teacherEmailHeader !== undefined ? (row[teacherEmailHeader] || '').trim() : '',
-      studentEmail: studentEmailHeader !== undefined ? (row[studentEmailHeader] || '').trim() : '',
-      timezone: timezoneHeader !== undefined ? (row[timezoneHeader] || '').trim() : CONFIG.TIMEZONE,
-      reminderMinutes: reminderMinutes
-    };
-    
-    // 如果时区为空，使用默认时区
-    if (!config.timezone) {
-      config.timezone = CONFIG.TIMEZONE;
-    }
-    
-    Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
-    Logger.log(`    组织者日历ID: ${config.organizerCalendarId}`);
-    Logger.log(`    老师邮箱: ${config.teacherEmail}`);
-    Logger.log(`    学生邮箱: ${config.studentEmail}`);
-    Logger.log(`    时区: ${config.timezone}`);
-    Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
-    
-    sheetConfigMap.set(sheetNameTrimmed, config);
-  }
   
-  Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个启用的 Sheet 配置`);
-  return sheetConfigMap;
+    Logger.log(`从配置表读取到 ${sheetConfigMap.size} 个启用的 Sheet 配置`);
+    Logger.log('readSheetConfig: 配置读取完成');
+    return sheetConfigMap;
+    
+  } catch (error) {
+    Logger.log('readSheetConfig: 捕获到错误');
+    Logger.log('错误类型: ' + (error.name || 'Unknown'));
+    Logger.log('错误消息: ' + (error.message || error.toString() || '未知错误'));
+    if (error.stack) {
+      Logger.log('错误堆栈: ' + error.stack);
+    }
+    throw error;
+  }
 }
 
 // ==================== 第三部分：课程数据处理和状态管理 ====================
@@ -758,7 +901,8 @@ function processSheet(spreadsheet, sheetName, config) {
  */
 function readCourseData(sheet, config) {
   const dataRange = sheet.getDataRange();
-  const values = dataRange.getValues();
+  // 使用 getDisplayValues() 获取显示值，避免格式问题
+  const values = dataRange.getDisplayValues();
   
   if (values.length < 2) {
     return [];
@@ -768,7 +912,12 @@ function readCourseData(sheet, config) {
   const headers = values[0];
   const headerMap = {};
   headers.forEach((header, index) => {
-    headerMap[header.trim()] = index;
+    // 使用清理后的文本作为键，但保留原始表头用于匹配
+    const rawHeader = String(header || '').trim();
+    const cleanedHeader = cleanHeaderText(rawHeader);
+    // 同时存储原始表头和清理后的表头
+    headerMap[rawHeader] = index;
+    headerMap[cleanedHeader] = index;
   });
   
   // 数据行（从第2行开始，索引1）
@@ -1810,7 +1959,112 @@ function createEventWithRetry(calendar, title, startTime, endTime, options) {
         Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
       }
       
-      const event = calendar.createEvent(title, startTime, endTime, options);
+      // 如果启用了 Meet 链接，使用 Calendar API 直接创建包含 Meet 链接的事件
+      // 这样可以确保 Meet 链接在创建时就存在，所有参与者都能看到
+      if (options && options.addMeetLink !== false) {
+        try {
+          const calendarId = calendar.getId();
+          
+          // 构建受邀者列表
+          const attendees = [];
+          if (options && options.guests) {
+            const guests = typeof options.guests === 'string' ? 
+              options.guests.split(',').map(email => email.trim()).filter(email => email) : 
+              options.guests;
+            
+            for (const guest of guests) {
+              if (guest) {
+                attendees.push({ email: guest });
+              }
+            }
+          }
+          
+          // 获取时区（从 course 对象或使用默认时区）
+          const timezone = (options && options.timezone) || Session.getScriptTimeZone();
+          
+          // 格式化日期时间为 RFC3339 格式
+          const formatDateTime = (date) => {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            const seconds = String(date.getSeconds()).padStart(2, '0');
+            return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+          };
+          
+          // 使用 Calendar API 创建事件（包含 Meet 链接）
+          const eventResource = {
+            summary: title,
+            description: options && options.description ? options.description : '',
+            start: {
+              dateTime: formatDateTime(startTime),
+              timeZone: timezone
+            },
+            end: {
+              dateTime: formatDateTime(endTime),
+              timeZone: timezone
+            },
+            attendees: attendees,
+            conferenceData: {
+              createRequest: {
+                requestId: Utilities.getUuid(),
+                conferenceSolutionKey: {
+                  type: 'hangoutsMeet'
+                }
+              }
+            }
+          };
+          
+          // 使用 Calendar API 创建事件
+          const createdEvent = Calendar.Events.insert(eventResource, calendarId, {
+            sendUpdates: options && options.sendInvites ? 'all' : 'none',
+            conferenceDataVersion: 1 // 确保 conferenceData 被处理
+          });
+          
+          // 获取创建的事件对象（用于返回）
+          const eventId = createdEvent.id;
+          const event = calendar.getEventById(eventId);
+          
+          Logger.log(`✓ 使用 Calendar API 创建事件（包含 Meet 链接）: ${eventId}`);
+          return event;
+        } catch (error) {
+          // 如果使用 Calendar API 创建失败，回退到使用 CalendarApp
+          Logger.log(`⚠️ 使用 Calendar API 创建事件失败，回退到 CalendarApp: ${error.message}`);
+          if (error.stack) {
+            Logger.log(`错误堆栈: ${error.stack}`);
+          }
+          // 继续执行，使用 CalendarApp 创建
+        }
+      }
+      
+      // 使用 CalendarApp 创建事件（回退方案或未启用 Meet 链接时）
+      const event = calendar.createEvent(title, startTime, endTime);
+      
+      // 设置描述
+      if (options && options.description) {
+        event.setDescription(options.description);
+      }
+      
+      // 添加受邀者（如果提供了 guests）
+      if (options && options.guests) {
+        const guests = typeof options.guests === 'string' ? 
+          options.guests.split(',').map(email => email.trim()).filter(email => email) : 
+          options.guests;
+        
+        for (const guest of guests) {
+          if (guest) {
+            event.addGuest(guest);
+          }
+        }
+      }
+      
+      // 发送邀请（如果设置了 sendInvites）
+      if (options && options.sendInvites) {
+        // 注意：addGuest 后会自动发送邀请，但我们可以显式设置
+        // 实际上，addGuest 已经会自动发送邀请邮件
+      }
+      
       return event;
     } catch (error) {
       lastError = error;
@@ -1826,6 +2080,7 @@ function createEventWithRetry(calendar, title, startTime, endTime, options) {
         }
       } else {
         // 非速率限制错误，直接抛出
+        Logger.log(`创建日历事件失败（非速率限制错误）: ${error.message}`);
         throw error;
       }
     }
@@ -2011,6 +2266,47 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
       // 更新事件信息（带速率限制处理）
       updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests);
       
+      // 确保事件有 Google Meet 链接
+      try {
+        const calendarId = calendar.getId();
+        const eventId = existingEventId.split('@')[0]; // 获取事件ID（去掉日历ID后缀）
+        
+        // 检查事件是否已有 Meet 链接
+        const existingEvent = Calendar.Events.get(calendarId, eventId);
+        
+        // 如果没有 Meet 链接，添加一个
+        if (!existingEvent.conferenceData || !existingEvent.conferenceData.entryPoints || 
+            existingEvent.conferenceData.entryPoints.length === 0) {
+          // Calendar.Events.patch(resource, calendarId, eventId, optionalArgs)
+          // 注意：添加 Meet 链接时需要发送更新通知，这样参与者才能看到 Meet 链接
+          Calendar.Events.patch({
+            conferenceData: {
+              createRequest: {
+                requestId: Utilities.getUuid(),
+                conferenceSolutionKey: {
+                  type: 'hangoutsMeet'
+                }
+              }
+            }
+          }, calendarId, eventId, {
+            sendUpdates: 'all' // 发送更新通知给所有参与者，确保他们能看到 Meet 链接
+          });
+          
+          // 等待一小段时间，让 Meet 链接有时间同步
+          Utilities.sleep(500);
+          
+          Logger.log(`✓ 已为更新的事件添加 Google Meet 链接: ${eventId}`);
+        } else {
+          Logger.log(`✓ 事件已有 Google Meet 链接: ${eventId}`);
+        }
+      } catch (error) {
+        // 如果添加 Meet 链接失败，记录日志但不影响事件更新
+        Logger.log(`⚠️ 添加/检查 Google Meet 链接失败: ${error.message}`);
+        if (error.stack) {
+          Logger.log(`错误堆栈: ${error.stack}`);
+        }
+      }
+      
       // 更新提醒（如果配置了提醒时间）
       // 注意：提醒会发送给所有参与者，包括组织者和受邀者（老师和学生）
       if (course.reminderMinutes && course.reminderMinutes > 0) {
@@ -2054,7 +2350,9 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
     {
       description: eventDescription,
       guests: eventGuests,
-      sendInvites: true
+      sendInvites: true,
+      addMeetLink: true, // 添加 Google Meet 链接
+      timezone: timezone // 传递时区信息
     }
   );
   
@@ -2416,5 +2714,62 @@ function formatDate(dateInput) {
     return String(dateInput);
   } catch (error) {
     return String(dateInput);
+  }
+}
+
+// ==================== 测试函数 ====================
+
+/**
+ * 测试函数 - 用于验证代码是否可以正常运行
+ * 在 Google Apps Script 编辑器中运行此函数来测试
+ */
+function test() {
+  try {
+    Logger.log('测试开始');
+    
+    // 测试1: 检查 CONFIG 对象
+    Logger.log('测试1: CONFIG 对象');
+    Logger.log('CONFIG.CONFIG_SHEET_NAME = ' + CONFIG.CONFIG_SHEET_NAME);
+    
+    // 测试2: 检查是否可以获取表格对象
+    Logger.log('测试2: 获取表格对象');
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    if (!spreadsheet) {
+      throw new Error('无法获取表格对象');
+    }
+    Logger.log('表格名称: ' + spreadsheet.getName());
+    
+    // 测试3: 检查是否可以获取所有 Sheet
+    Logger.log('测试3: 获取所有 Sheet');
+    const sheets = spreadsheet.getSheets();
+    Logger.log('Sheet 数量: ' + sheets.length);
+    sheets.forEach((sheet, index) => {
+      Logger.log(`  Sheet ${index + 1}: ${sheet.getName()}`);
+    });
+    
+    // 测试4: 检查配置表是否存在
+    Logger.log('测试4: 检查配置表');
+    const configSheet = spreadsheet.getSheetByName(CONFIG.CONFIG_SHEET_NAME);
+    if (configSheet) {
+      Logger.log('✓ 配置表存在: ' + CONFIG.CONFIG_SHEET_NAME);
+      const dataRange = configSheet.getDataRange();
+      const values = dataRange.getValues();
+      Logger.log('配置表行数: ' + values.length);
+      if (values.length > 0) {
+        Logger.log('配置表表头: ' + values[0].join(', '));
+      }
+    } else {
+      Logger.log('✗ 配置表不存在: ' + CONFIG.CONFIG_SHEET_NAME);
+    }
+    
+    Logger.log('测试完成');
+    return '测试成功';
+    
+  } catch (error) {
+    Logger.log('测试失败: ' + error.message);
+    if (error.stack) {
+      Logger.log('错误堆栈: ' + error.stack);
+    }
+    throw error;
   }
 }
