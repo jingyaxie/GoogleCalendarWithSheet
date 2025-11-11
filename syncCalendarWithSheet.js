@@ -15,7 +15,7 @@
  * 架构设计：
  * - 配置表（_SheetConfig）：管理要处理的Sheet列表和配置信息
  * - 状态表（_StatusLog_{SheetName}）：记录每条课程的处理状态和事件ID
- * - 主课程表：包含课程信息（课次、日期、课程内容、时间、老师、学生）
+ * - 主课程表：包含课程信息（课次、开始时间、结束时间、课程内容、老师、学生）
  * 
  * ==================== 作为库使用 ====================
  * 
@@ -735,8 +735,8 @@ function readSheetConfig(spreadsheet) {
       
       Logger.log(`  ✓ 添加 Sheet: ${sheetNameTrimmed}`);
       Logger.log(`    组织者日历ID: ${config.organizerCalendarId}`);
-      Logger.log(`    老师邮箱: ${config.teacherEmail}`);
-      Logger.log(`    学生邮箱: ${config.studentEmail}`);
+      Logger.log(`    老师邮箱: ${config.teacherEmail || '未配置'}`);
+      Logger.log(`    学生邮箱: ${config.studentEmail || '未配置'}`);
       Logger.log(`    时区: ${config.timezone}`);
       Logger.log(`    提醒时间: ${config.reminderMinutes ? config.reminderMinutes + '分钟' : '未配置'}`);
       
@@ -800,7 +800,8 @@ function processSheet(spreadsheet, sheetName, config) {
       for (const deletedRecord of deletedRecords) {
         try {
           cancelCourse(deletedRecord, statusSheet, config);
-          Logger.log(`[${sheetName}] 取消课程成功: ${deletedRecord.lessonNumber} - ${deletedRecord.date}`);
+          const deletedDateStr = deletedRecord.date ? String(deletedRecord.date) : '未知日期';
+          Logger.log(`[${sheetName}] 取消课程成功: ${deletedRecord.lessonNumber} - ${deletedDateStr}`);
         } catch (error) {
           Logger.log(`[${sheetName}] 取消课程失败: ${deletedRecord.lessonNumber} - ${error.message}`);
         }
@@ -824,7 +825,9 @@ function processSheet(spreadsheet, sheetName, config) {
         existingRecord = processedRecords.byId.get(course.recordId);
       }
       if (!existingRecord) {
-        const key = `${course.lessonNumber}_${course.date}`;
+        // 从开始时间中提取日期用于生成key（向后兼容）
+        const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
+        const key = `${course.lessonNumber}_${dateStr}`;
         existingRecord = processedRecords.byKey.get(key);
       }
       
@@ -832,7 +835,8 @@ function processSheet(spreadsheet, sheetName, config) {
         // 新记录，需要处理
         // 检查是否有相同课次但不同日期的旧记录（日期变化）
         const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
-        const oldRecords = findOldRecordsByLessonNumber(statusSheet, course.lessonNumber, course.date, timezone);
+        const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
+        const oldRecords = findOldRecordsByLessonNumber(statusSheet, course.lessonNumber, dateStr, timezone);
         if (oldRecords.length > 0) {
           Logger.log(`[${sheetName}] 检测到日期变化: ${course.lessonNumber}，将在处理时删除旧日期的日历事件`);
           // 标记需要删除的旧记录，在processCourse中处理（因为需要日历ID）
@@ -1003,43 +1007,45 @@ function readCourseData(sheet, config) {
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
     
-    // 跳过空行
-    if (!row[0] || !row[headerMap['日期']]) {
+    // 跳过空行（检查第一列或开始时间列）
+    if (!row[0] || !row[headerMap['开始时间']]) {
       continue;
     }
     
     try {
+      // 读取开始时间和结束时间（支持日期+时间组合或只有日期）
+      const startTimeInput = row[headerMap['开始时间']] || '';
+      const endTimeInput = row[headerMap['结束时间']] || '';
+      
+      // 获取记录ID（如果正式表有"记录ID"列，使用它）
+      let recordId = '';
+      if (headerMap['记录ID'] !== undefined) {
+        recordId = row[headerMap['记录ID']] || '';
+      }
+      
+      // 创建课程记录
       const course = {
         lessonNumber: row[headerMap['课次']] || '',
-        date: row[headerMap['日期']] || '',
+        startTimeInput: startTimeInput, // 保留原始开始时间输入（用于日志和调试）
+        endTimeInput: endTimeInput, // 保留原始结束时间输入（用于日志和调试）
         courseTitle: row[headerMap['课程内容/主题']] || '',
         teacherName: row[headerMap['老师']] || '',
         studentName: row[headerMap['学生']] || '',
-        startTime: row[headerMap['开始时间']] || '',
-        endTime: row[headerMap['结束时间']] || '',
         // 从配置中获取邮箱和日历ID
         teacherEmail: config.teacherEmail || '',
         studentEmail: config.studentEmail || '',
         organizerCalendarId: config.organizerCalendarId || '',
-        rowIndex: i + 1 // 记录行号（正式表的行号，从1开始，包含表头），用于和状态表一一对应
+        rowIndex: i + 1, // 记录行号（正式表的行号，从1开始，包含表头），用于和状态表一一对应
+        recordId: recordId,
+        recordIdColumnIndex: headerMap['记录ID'] // 记录记录ID列的索引（用于后续更新）
       };
-      
-      // 获取记录ID（如果正式表有"记录ID"列，使用它）
-      if (headerMap['记录ID'] !== undefined) {
-        course.recordId = row[headerMap['记录ID']] || '';
-      } else {
-        course.recordId = ''; // 稍后从状态表获取或生成
-      }
-      
-      // 记录记录ID列的索引（用于后续更新）
-      course.recordIdColumnIndex = headerMap['记录ID'];
       
       // 计算token
       course.token = calculateCourseToken(course);
       
       // 验证必要字段
-      if (!course.date || !course.organizerCalendarId) {
-        Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段`);
+      if (!startTimeInput || !course.organizerCalendarId) {
+        Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段（开始时间或组织者日历ID）`);
         continue;
       }
       
@@ -1212,7 +1218,8 @@ function assignRecordIds(courses, processedRecords, statusSheet, mainSheet) {
     }
     
     // 尝试通过key查找（向后兼容）
-    const key = `${course.lessonNumber}_${course.date}`;
+    const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
+    const key = `${course.lessonNumber}_${dateStr}`;
     const existingRecord = processedRecords.byKey.get(key);
     if (existingRecord && existingRecord.recordId) {
       recordId = existingRecord.recordId;
@@ -1254,7 +1261,8 @@ function getExistingEventIds(statusSheet, course) {
   
   // 如果没有找到，尝试通过key查找（向后兼容）
   if (!existingRecord) {
-    const key = `${course.lessonNumber}_${course.date}`;
+    const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
+    const key = `${course.lessonNumber}_${dateStr}`;
     existingRecord = processedRecords.byKey.get(key);
   }
   
@@ -1299,7 +1307,8 @@ function findDeletedRecords(courses, processedRecords, statusSheet) {
   // 检查通过key索引的记录（向后兼容，处理没有记录ID的旧记录）
   const courseKeys = new Set();
   courses.forEach(course => {
-    const key = `${course.lessonNumber}_${course.date}`;
+    const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
+    const key = `${course.lessonNumber}_${dateStr}`;
     courseKeys.add(key);
   });
   
@@ -1952,29 +1961,19 @@ function deleteCalendarEvent(calendarId, eventId) {
 
 /**
  * 计算课程关键信息的token（用于检测变化）
- * 包括：日期、开始时间、结束时间、课程内容、老师、老师邮箱、学生、学生邮箱
+ * 包括：开始时间、结束时间、课程内容、老师、老师邮箱、学生、学生邮箱
  * @param {Object} course - 课程对象，包含 timezone 属性
  */
 function calculateCourseToken(course) {
   // 获取时区（优先使用课程配置的时区，否则使用默认时区）
   const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
   
-  // 标准化日期和时间格式
-  const dateStr = course.date instanceof Date ? 
-    Utilities.formatDate(course.date, timezone, 'yyyy-MM-dd') : 
-    String(course.date);
-  
-  const startTimeStr = course.startTime instanceof Date ?
-    Utilities.formatDate(course.startTime, timezone, 'HH:mm') :
-    String(course.startTime);
-  
-  const endTimeStr = course.endTime instanceof Date ?
-    Utilities.formatDate(course.endTime, timezone, 'HH:mm') :
-    String(course.endTime);
+  // 使用原始输入字符串（startTimeInput 和 endTimeInput）
+  const startTimeStr = String(course.startTimeInput || '');
+  const endTimeStr = String(course.endTimeInput || '');
   
   // 构建关键信息字符串
   const keyInfo = [
-    dateStr,
     startTimeStr,
     endTimeStr,
     String(course.courseTitle || ''),
@@ -2037,9 +2036,13 @@ function createEventWithRetry(calendar, title, startTime, endTime, options) {
         Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
       }
       
-      // 如果启用了 Meet 链接，使用 Calendar API 直接创建包含 Meet 链接的事件
+      // 检查是否是全天事件
+      const isAllDay = options && options.isAllDay === true;
+      
+      // 如果启用了 Meet 链接且不是全天事件，使用 Calendar API 直接创建包含 Meet 链接的事件
       // 这样可以确保 Meet 链接在创建时就存在，所有参与者都能看到
-      if (options && options.addMeetLink !== false) {
+      // 注意：全天事件不需要 Meet 链接
+      if (options && options.addMeetLink !== false && !isAllDay) {
         try {
           const calendarId = calendar.getId();
           
@@ -2113,6 +2116,58 @@ function createEventWithRetry(calendar, title, startTime, endTime, options) {
             Logger.log(`错误堆栈: ${error.stack}`);
           }
           // 继续执行，使用 CalendarApp 创建
+        }
+      }
+      
+      // 如果是全天事件，使用 Calendar API 创建（CalendarApp 不支持全天事件）
+      if (isAllDay && options && options.startDate && options.endDate) {
+        try {
+          const calendarId = calendar.getId();
+          
+          // 构建受邀者列表
+          const attendees = [];
+          if (options && options.guests) {
+            const guests = typeof options.guests === 'string' ? 
+              options.guests.split(',').map(email => email.trim()).filter(email => email) : 
+              options.guests;
+            
+            for (const guest of guests) {
+              if (guest) {
+                attendees.push({ email: guest });
+              }
+            }
+          }
+          
+          // 使用 Calendar API 创建全天事件（使用 date 字段）
+          const eventResource = {
+            summary: title,
+            description: options && options.description ? options.description : '',
+            start: {
+              date: options.startDate // 格式：yyyy-MM-dd
+            },
+            end: {
+              date: options.endDate // 格式：yyyy-MM-dd（结束日期是独占的，应该是开始日期的下一天）
+            },
+            attendees: attendees
+          };
+          
+          // 使用 Calendar API 创建事件
+          const createdEvent = Calendar.Events.insert(eventResource, calendarId, {
+            sendUpdates: options && options.sendInvites ? 'all' : 'none'
+          });
+          
+          // 获取创建的事件对象（用于返回）
+          const eventId = createdEvent.id;
+          const event = calendar.getEventById(eventId);
+          
+          Logger.log(`✓ 使用 Calendar API 创建全天事件: ${eventId} (${options.startDate} 到 ${options.endDate})`);
+          return event;
+        } catch (error) {
+          Logger.log(`⚠️ 使用 Calendar API 创建全天事件失败: ${error.message}`);
+          if (error.stack) {
+            Logger.log(`错误堆栈: ${error.stack}`);
+          }
+          throw error; // 全天事件创建失败，直接抛出错误
         }
       }
       
@@ -2216,8 +2271,11 @@ function deleteEventWithRetry(event) {
  * @param {Date} startTime - 开始时间
  * @param {Date} endTime - 结束时间
  * @param {string} guests - 参与者列表（逗号分隔）
+ * @param {boolean} isAllDay - 是否是全天事件（可选）
+ * @param {string} startDate - 全天事件的开始日期（格式：yyyy-MM-dd，可选）
+ * @param {string} endDate - 全天事件的结束日期（格式：yyyy-MM-dd，可选）
  */
-function updateEventWithRetry(event, title, description, startTime, endTime, guests) {
+function updateEventWithRetry(event, title, description, startTime, endTime, guests, isAllDay, startDate, endDate) {
   let lastError;
   const maxRetries = CONFIG.RATE_LIMIT.MAX_RETRIES;
   const retryDelay = CONFIG.RATE_LIMIT.RETRY_DELAY;
@@ -2230,7 +2288,50 @@ function updateEventWithRetry(event, title, description, startTime, endTime, gue
         Utilities.sleep(retryDelay * (attempt - 1)); // 递增延迟
       }
       
-      // 更新事件信息
+      // 如果是全天事件，使用 Calendar API 更新（CalendarApp 不支持全天事件）
+      if (isAllDay && startDate && endDate) {
+        try {
+          const eventId = event.getId().split('@')[0]; // 获取事件ID（去掉日历ID后缀）
+          const calendarId = event.getCalendar().getId();
+          
+          // 构建受邀者列表
+          const attendees = [];
+          if (guests) {
+            const guestEmails = guests.split(',').map(email => email.trim()).filter(email => email);
+            for (const email of guestEmails) {
+              if (email) {
+                attendees.push({ email: email });
+              }
+            }
+          }
+          
+          // 使用 Calendar API 更新全天事件
+          const eventResource = {
+            summary: title,
+            description: description || '',
+            start: {
+              date: startDate // 格式：yyyy-MM-dd
+            },
+            end: {
+              date: endDate // 格式：yyyy-MM-dd（结束日期是独占的）
+            },
+            attendees: attendees
+          };
+          
+          // 使用 Calendar API 更新事件
+          Calendar.Events.patch(eventResource, calendarId, eventId, {
+            sendUpdates: 'all' // 发送更新通知给所有参与者
+          });
+          
+          Logger.log(`✓ 使用 Calendar API 更新全天事件: ${eventId} (${startDate} 到 ${endDate})`);
+          return;
+        } catch (error) {
+          Logger.log(`⚠️ 使用 Calendar API 更新全天事件失败: ${error.message}`);
+          throw error; // 全天事件更新失败，抛出错误
+        }
+      }
+      
+      // 更新事件信息（非全天事件）
       event.setTitle(title);
       event.setDescription(description);
       event.setTime(startTime, endTime);
@@ -2294,13 +2395,55 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
     throw new Error('日历ID为空');
   }
   
-  // 解析日期和时间（使用时区）
+  // 解析开始时间和结束时间（使用时区）
   const timezone = course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
-  const startDateTime = parseDateTime(course.date, course.startTime, timezone);
-  const endDateTime = parseDateTime(course.date, course.endTime, timezone);
   
-  if (!startDateTime || !endDateTime) {
-    throw new Error('日期时间解析失败');
+  // 解析开始时间和结束时间（支持日期+时间组合或只有日期）
+  const startDateTime = parseDateTimeCombined(course.startTimeInput, timezone, true);
+  const endDateTime = parseDateTimeCombined(course.endTimeInput, timezone, false);
+  
+  if (!startDateTime) {
+    throw new Error('开始时间解析失败');
+  }
+  
+  // 如果没有结束时间，使用开始时间的日期作为结束日期（23:59:59）
+  let finalEndDateTime = endDateTime;
+  if (!finalEndDateTime) {
+    // 如果结束时间为空，使用开始时间的日期，时间设为 23:59:59
+    const startDate = new Date(startDateTime);
+    startDate.setHours(23, 59, 59, 999);
+    finalEndDateTime = startDate;
+    Logger.log(`结束时间为空，使用开始时间的日期（23:59:59）`);
+  }
+  
+  // 检查是否是全天事件（开始时间是 00:00:00，结束时间是 23:59:59，且是同一天）
+  const startDateOnly = new Date(startDateTime);
+  startDateOnly.setHours(0, 0, 0, 0);
+  const endDateOnly = new Date(finalEndDateTime);
+  endDateOnly.setHours(0, 0, 0, 0);
+  
+  const isSameDay = startDateOnly.getTime() === endDateOnly.getTime();
+  const isStartMidnight = startDateTime.getHours() === 0 && startDateTime.getMinutes() === 0 && startDateTime.getSeconds() === 0;
+  const isEndMidnight = finalEndDateTime.getHours() === 23 && finalEndDateTime.getMinutes() === 59 && finalEndDateTime.getSeconds() === 59;
+  
+  const isAllDayEvent = isSameDay && isStartMidnight && isEndMidnight;
+  
+  // 如果是全天事件，准备日期字符串（用于 Google Calendar API）
+  let startDate, endDate;
+  if (isAllDayEvent) {
+    const year = startDateTime.getFullYear();
+    const month = String(startDateTime.getMonth() + 1).padStart(2, '0');
+    const day = String(startDateTime.getDate()).padStart(2, '0');
+    startDate = `${year}-${month}-${day}`;
+    
+    // 结束日期应该是开始日期的下一天（Google Calendar 全天事件的结束日期是独占的）
+    const endDateObj = new Date(startDate + 'T00:00:00');
+    endDateObj.setDate(endDateObj.getDate() + 1);
+    const endYear = endDateObj.getFullYear();
+    const endMonth = String(endDateObj.getMonth() + 1).padStart(2, '0');
+    const endDay = String(endDateObj.getDate()).padStart(2, '0');
+    endDate = `${endYear}-${endMonth}-${endDay}`;
+    Logger.log(`检测到全天事件: ${startDate} 到 ${endDate}`);
   }
   
   // 获取日历（直接通过ID获取，不遍历，不使用默认日历）
@@ -2316,8 +2459,18 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
   // 构建事件信息
   const eventSummary = course.courseTitle;
   const eventDescription = `课程：${course.courseTitle}\n老师：${course.teacherName}\n学生：${course.studentName}\n课次：${course.lessonNumber}`;
-  const eventStart = new Date(startDateTime);
-  const eventEnd = new Date(endDateTime);
+  
+  // 根据是否是全天事件，构建不同的开始和结束时间
+  let eventStart, eventEnd;
+  if (isAllDayEvent) {
+    // 全天事件：使用 Date 对象，但只使用日期部分（时间部分会被忽略）
+    eventStart = new Date(startDate + 'T00:00:00');
+    eventEnd = new Date(endDate + 'T00:00:00');
+  } else {
+    // 有时间的事件：使用日期时间
+    eventStart = new Date(startDateTime);
+    eventEnd = new Date(finalEndDateTime);
+  }
   
   // 构建受邀者列表（老师和学生）
   const guests = [];
@@ -2342,47 +2495,51 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
       event = calendar.getEventById(existingEventId);
       
       // 更新事件信息（带速率限制处理）
-      updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests);
+      updateEventWithRetry(event, eventSummary, eventDescription, eventStart, eventEnd, eventGuests, isAllDayEvent, isAllDayEvent ? startDate : null, isAllDayEvent ? endDate : null);
       
-      // 确保事件有 Google Meet 链接
-      try {
-        const calendarId = calendar.getId();
-        const eventId = existingEventId.split('@')[0]; // 获取事件ID（去掉日历ID后缀）
-        
-        // 检查事件是否已有 Meet 链接
-        const existingEvent = Calendar.Events.get(calendarId, eventId);
-        
-        // 如果没有 Meet 链接，添加一个
-        if (!existingEvent.conferenceData || !existingEvent.conferenceData.entryPoints || 
-            existingEvent.conferenceData.entryPoints.length === 0) {
-          // Calendar.Events.patch(resource, calendarId, eventId, optionalArgs)
-          // 注意：添加 Meet 链接时需要发送更新通知，这样参与者才能看到 Meet 链接
-          Calendar.Events.patch({
-            conferenceData: {
-              createRequest: {
-                requestId: Utilities.getUuid(),
-                conferenceSolutionKey: {
-                  type: 'hangoutsMeet'
+      // 确保事件有 Google Meet 链接（全天事件不需要 Meet 链接）
+      if (!isAllDayEvent) {
+        try {
+          const calendarId = calendar.getId();
+          const eventId = existingEventId.split('@')[0]; // 获取事件ID（去掉日历ID后缀）
+          
+          // 检查事件是否已有 Meet 链接
+          const existingEvent = Calendar.Events.get(calendarId, eventId);
+          
+          // 如果没有 Meet 链接，添加一个
+          if (!existingEvent.conferenceData || !existingEvent.conferenceData.entryPoints || 
+              existingEvent.conferenceData.entryPoints.length === 0) {
+            // Calendar.Events.patch(resource, calendarId, eventId, optionalArgs)
+            // 注意：添加 Meet 链接时需要发送更新通知，这样参与者才能看到 Meet 链接
+            Calendar.Events.patch({
+              conferenceData: {
+                createRequest: {
+                  requestId: Utilities.getUuid(),
+                  conferenceSolutionKey: {
+                    type: 'hangoutsMeet'
+                  }
                 }
               }
-            }
-          }, calendarId, eventId, {
-            sendUpdates: 'all' // 发送更新通知给所有参与者，确保他们能看到 Meet 链接
-          });
-          
-          // 等待一小段时间，让 Meet 链接有时间同步
-          Utilities.sleep(500);
-          
-          Logger.log(`✓ 已为更新的事件添加 Google Meet 链接: ${eventId}`);
-        } else {
-          Logger.log(`✓ 事件已有 Google Meet 链接: ${eventId}`);
+            }, calendarId, eventId, {
+              sendUpdates: 'all' // 发送更新通知给所有参与者，确保他们能看到 Meet 链接
+            });
+            
+            // 等待一小段时间，让 Meet 链接有时间同步
+            Utilities.sleep(500);
+            
+            Logger.log(`✓ 已为更新的事件添加 Google Meet 链接: ${eventId}`);
+          } else {
+            Logger.log(`✓ 事件已有 Google Meet 链接: ${eventId}`);
+          }
+        } catch (error) {
+          // 如果添加 Meet 链接失败，记录日志但不影响事件更新
+          Logger.log(`⚠️ 添加/检查 Google Meet 链接失败: ${error.message}`);
+          if (error.stack) {
+            Logger.log(`错误堆栈: ${error.stack}`);
+          }
         }
-      } catch (error) {
-        // 如果添加 Meet 链接失败，记录日志但不影响事件更新
-        Logger.log(`⚠️ 添加/检查 Google Meet 链接失败: ${error.message}`);
-        if (error.stack) {
-          Logger.log(`错误堆栈: ${error.stack}`);
-        }
+      } else {
+        Logger.log(`全天事件，跳过添加 Google Meet 链接`);
       }
       
       // 更新提醒（如果配置了提醒时间）
@@ -2429,8 +2586,11 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
       description: eventDescription,
       guests: eventGuests,
       sendInvites: true,
-      addMeetLink: true, // 添加 Google Meet 链接
-      timezone: timezone // 传递时区信息
+      addMeetLink: !isAllDayEvent, // 全天事件不需要 Meet 链接
+      timezone: timezone, // 传递时区信息
+      isAllDay: isAllDayEvent, // 传递全天事件标志
+      startDate: isAllDayEvent ? startDate : null, // 全天事件的开始日期
+      endDate: isAllDayEvent ? endDate : null // 全天事件的结束日期
     }
   );
   
@@ -2649,10 +2809,8 @@ function updateStatusRecord(statusSheet, course, result) {
   // 获取或计算token
   const token = course.token || calculateCourseToken(course);
   
-  // 格式化日期（确保是字符串格式）
-  const dateStr = course.date instanceof Date ? 
-    Utilities.formatDate(course.date, course.timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone(), 'yyyy-MM-dd') : 
-    String(course.date);
+  // 从开始时间中提取日期（用于状态表）
+  const dateStr = extractDateFromDateTimeInput(course.startTimeInput);
   
   // 使用表头映射来写入数据，而不是固定的列索引
   // 获取所有列索引，确保列存在
@@ -2682,6 +2840,507 @@ function updateStatusRecord(statusSheet, course, result) {
   
   // 直接更新对应行（状态表和正式表一一对应）
   statusSheet.getRange(rowIndex, 1, 1, totalCols).setValues([rowData]);
+}
+
+/**
+ * 从日期时间输入中提取日期部分（用于向后兼容和状态表）
+ * @param {string} dateTimeInput - 日期时间输入（可能是日期+时间或只有日期）
+ * @returns {string} 日期字符串（格式：yyyy-MM-dd），如果解析失败返回空字符串
+ */
+function extractDateFromDateTimeInput(dateTimeInput) {
+  try {
+    if (!dateTimeInput || typeof dateTimeInput !== 'string') {
+      return '';
+    }
+    
+    const inputStr = String(dateTimeInput).trim();
+    if (inputStr === '') {
+      return '';
+    }
+    
+    // 检查是否包含时间部分（包含空格和冒号）
+    const hasTime = inputStr.includes(' ') && inputStr.includes(':');
+    
+    let dateStr;
+    if (hasTime) {
+      // 包含时间部分：分离日期和时间
+      const spaceIndex = inputStr.indexOf(' ');
+      dateStr = inputStr.substring(0, spaceIndex).trim();
+    } else {
+      // 只有日期部分
+      dateStr = inputStr;
+    }
+    
+    // 解析日期部分为标准格式
+    if (dateStr.includes('/')) {
+      const [year, month, day] = dateStr.split('/').map(Number);
+      if (year && month && day) {
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+    } else if (dateStr.includes('-')) {
+      // 验证是否是有效的日期格式
+      const dateRegex = /^\d{4}-\d{1,2}-\d{1,2}$/;
+      if (dateRegex.test(dateStr)) {
+        // 标准化格式
+        const [year, month, day] = dateStr.split('-').map(Number);
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+    }
+    
+    return '';
+  } catch (error) {
+    Logger.log(`提取日期失败: ${dateTimeInput} - ${error.message}`);
+    return '';
+  }
+}
+
+/**
+ * 解析日期时间组合，返回日期时间对象
+ * 支持格式：
+ * - 日期+时间：2025/11/14 09:00、2025-11-14 09:00
+ * - 只有日期：2025/11/14、2025-11-14（时间部分为空，需要根据是开始时间还是结束时间设置默认值）
+ * @param {string} dateTimeInput - 日期时间输入（可能是日期+时间或只有日期）
+ * @param {string} timezone - 时区（可选，默认使用脚本时区）
+ * @param {boolean} isStartTime - 是否是开始时间（true：开始时间，false：结束时间）
+ * @returns {Date|null} 解析后的日期时间对象，如果解析失败返回 null
+ */
+function parseDateTimeCombined(dateTimeInput, timezone, isStartTime) {
+  try {
+    if (!dateTimeInput || typeof dateTimeInput !== 'string') {
+      return null;
+    }
+    
+    const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+    const inputStr = String(dateTimeInput).trim();
+    
+    if (inputStr === '') {
+      return null;
+    }
+    
+    // 检查是否包含时间部分（包含空格和冒号，如 "2025/11/14 09:00"）
+    const hasTime = inputStr.includes(' ') && inputStr.includes(':');
+    
+    let dateStr, timeStr;
+    
+    if (hasTime) {
+      // 包含时间部分：分离日期和时间
+      const spaceIndex = inputStr.indexOf(' ');
+      dateStr = inputStr.substring(0, spaceIndex).trim();
+      timeStr = inputStr.substring(spaceIndex + 1).trim();
+    } else {
+      // 只有日期部分
+      dateStr = inputStr;
+      timeStr = '';
+    }
+    
+    // 解析日期部分
+    let date;
+    if (dateStr.includes('/')) {
+      const [year, month, day] = dateStr.split('/').map(Number);
+      if (year && month && day) {
+        date = new Date(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00`);
+      } else {
+        return null;
+      }
+    } else if (dateStr.includes('-')) {
+      date = new Date(dateStr + 'T00:00:00');
+    } else {
+      return null;
+    }
+    
+    if (isNaN(date.getTime())) {
+      return null;
+    }
+    
+    // 解析时间部分
+    let hours = 0;
+    let minutes = 0;
+    let seconds = 0;
+    
+    if (timeStr) {
+      // 有时间部分：解析时间
+      const timeParts = timeStr.split(':').map(Number);
+      hours = timeParts[0] || 0;
+      minutes = timeParts[1] || 0;
+      seconds = timeParts[2] || 0;
+    } else {
+      // 没有时间部分：根据是开始时间还是结束时间设置默认值
+      if (isStartTime) {
+        // 开始时间：从该日期的 00:00:00 开始
+        hours = 0;
+        minutes = 0;
+        seconds = 0;
+      } else {
+        // 结束时间：到该日期的 23:59:59 结束
+        hours = 23;
+        minutes = 59;
+        seconds = 59;
+      }
+    }
+    
+    // 构建日期时间字符串（指定时区的本地时间）
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hourStr = String(hours).padStart(2, '0');
+    const minuteStr = String(minutes).padStart(2, '0');
+    const secondStr = String(seconds).padStart(2, '0');
+    
+    const dateTimeStr = `${year}-${month}-${day} ${hourStr}:${minuteStr}:${secondStr}`;
+    
+    // 使用 Utilities.parseDate 来解析指定时区的日期时间字符串
+    const finalDate = Utilities.parseDate(dateTimeStr, tz, 'yyyy-MM-dd HH:mm:ss');
+    
+    Logger.log(`解析日期时间: ${dateTimeInput} (${isStartTime ? '开始' : '结束'}) -> ${finalDate.toISOString()}`);
+    
+    return finalDate;
+  } catch (error) {
+    Logger.log(`日期时间解析错误: ${dateTimeInput} - ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * 解析日期范围，返回开始日期和结束日期
+ * 支持格式：
+ * - 单个日期：2025/11/14 或 2025-11-14（开始日期和结束日期相同）
+ * - 日期范围：2025/11/14-2025/11/19 或 2025/11/14 到 2025/11/19
+ * @param {string} dateInput - 日期输入（可能是单个日期或日期范围）
+ * @param {string} timezone - 时区（可选，默认使用脚本时区）
+ * @returns {Object|null} 包含 startDate 和 endDate 的对象（格式：yyyy-MM-dd），如果解析失败返回 null
+ */
+function parseDateRangeToStartEnd(dateInput, timezone) {
+  try {
+    if (!dateInput || typeof dateInput !== 'string') {
+      return null;
+    }
+    
+    const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+    const dateStr = String(dateInput).trim();
+    
+    // 辅助函数：检查字符串是否是有效的日期格式（yyyy-MM-dd 或 yyyy/MM/dd）
+    const isValidDateFormat = (str) => {
+      const dateRegex = /^\d{4}[-\/]\d{1,2}[-\/]\d{1,2}$/;
+      return dateRegex.test(str.trim());
+    };
+    
+    // 辅助函数：解析单个日期字符串为标准格式（yyyy-MM-dd）
+    const parseSingleDate = (dateStr) => {
+      if (dateStr.includes('/')) {
+        const [year, month, day] = dateStr.split('/').map(Number);
+        if (year && month && day) {
+          return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+      } else if (dateStr.includes('-')) {
+        if (isValidDateFormat(dateStr)) {
+          return dateStr;
+        }
+      }
+      return null;
+    };
+    
+    // 检查是否是日期范围（优先检查中文分隔符，避免与日期格式冲突）
+    let startDateStr = null;
+    let endDateStr = null;
+    
+    // 先检查中文分隔符（这些不会与日期格式冲突）
+    const chineseSeparators = [' 到 ', ' 至 '];
+    for (const sep of chineseSeparators) {
+      if (dateStr.includes(sep)) {
+        const parts = dateStr.split(sep);
+        if (parts.length === 2) {
+          const part1 = parts[0].trim();
+          const part2 = parts[1].trim();
+          if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+            startDateStr = parseSingleDate(part1);
+            endDateStr = parseSingleDate(part2);
+            break;
+          }
+        }
+      }
+    }
+    
+    // 如果没有找到中文分隔符，检查其他分隔符
+    if (!startDateStr || !endDateStr) {
+      const otherSeparators = ['~', '～'];
+      for (const sep of otherSeparators) {
+        if (dateStr.includes(sep)) {
+          const parts = dateStr.split(sep);
+          if (parts.length === 2) {
+            const part1 = parts[0].trim();
+            const part2 = parts[1].trim();
+            if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+              startDateStr = parseSingleDate(part1);
+              endDateStr = parseSingleDate(part2);
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // 最后检查 '-' 分隔符（需要小心，因为单个日期也包含 '-'）
+    if (!startDateStr || !endDateStr) {
+      const dashIndices = [];
+      for (let i = 0; i < dateStr.length; i++) {
+        if (dateStr[i] === '-') {
+          dashIndices.push(i);
+        }
+      }
+      
+      if (dashIndices.length >= 1) {
+        for (const dashIndex of dashIndices) {
+          const part1 = dateStr.substring(0, dashIndex).trim();
+          const part2 = dateStr.substring(dashIndex + 1).trim();
+          
+          if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+            const part1DashCount = (part1.match(/-/g) || []).length;
+            const part2DashCount = (part2.match(/-/g) || []).length;
+            
+            if ((part1DashCount === 2 && part2DashCount === 2) ||
+                (part1.includes('/') && part2.includes('/'))) {
+              startDateStr = parseSingleDate(part1);
+              endDateStr = parseSingleDate(part2);
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // 如果不是日期范围，返回单个日期（开始日期和结束日期相同）
+    if (!startDateStr || !endDateStr) {
+      const singleDate = parseSingleDate(dateStr);
+      if (singleDate) {
+        return {
+          startDate: singleDate,
+          endDate: singleDate
+        };
+      }
+      return null;
+    }
+    
+    // 验证日期格式
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(startDateStr) || !dateRegex.test(endDateStr)) {
+      Logger.log(`日期范围格式无效: ${dateStr}`);
+      return null;
+    }
+    
+    // 将日期字符串转换为 Date 对象进行比较
+    const start = new Date(startDateStr + 'T00:00:00');
+    const end = new Date(endDateStr + 'T00:00:00');
+    
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      Logger.log(`日期范围解析失败: ${dateStr}`);
+      return null;
+    }
+    
+    if (start > end) {
+      Logger.log(`日期范围无效（开始日期晚于结束日期）: ${dateStr}`);
+      return null;
+    }
+    
+    Logger.log(`解析日期范围: ${dateStr} -> 开始: ${startDateStr}, 结束: ${endDateStr}`);
+    
+    return {
+      startDate: startDateStr,
+      endDate: endDateStr
+    };
+  } catch (error) {
+    Logger.log(`日期范围解析错误: ${dateInput} - ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * 解析日期范围
+ * 支持格式：
+ * - 单个日期：2025/11/14 或 2025-11-14
+ * - 日期范围：2025/11/14-2025/11/19 或 2025/11/14 到 2025/11/19
+ * @param {string} dateInput - 日期输入（可能是单个日期或日期范围）
+ * @param {string} timezone - 时区（可选，默认使用脚本时区）
+ * @returns {Array<string>} 日期字符串数组（格式：yyyy-MM-dd）
+ * @deprecated 此函数已废弃，请使用 parseDateRangeToStartEnd
+ */
+function parseDateRange(dateInput, timezone) {
+  try {
+    if (!dateInput || typeof dateInput !== 'string') {
+      return [];
+    }
+    
+    const tz = timezone || CONFIG.TIMEZONE || Session.getScriptTimeZone();
+    const dateStr = String(dateInput).trim();
+    
+    // 辅助函数：检查字符串是否是有效的日期格式（yyyy-MM-dd 或 yyyy/MM/dd）
+    const isValidDateFormat = (str) => {
+      const dateRegex = /^\d{4}[-\/]\d{1,2}[-\/]\d{1,2}$/;
+      return dateRegex.test(str.trim());
+    };
+    
+    // 检查是否是日期范围（优先检查中文分隔符，避免与日期格式冲突）
+    // 支持的分隔符：' 到 '、' 至 '、'~'、'～'、'-'（但需要验证分割后的两部分都是日期）
+    let startDateStr = null;
+    let endDateStr = null;
+    
+    // 先检查中文分隔符（这些不会与日期格式冲突）
+    const chineseSeparators = [' 到 ', ' 至 '];
+    for (const sep of chineseSeparators) {
+      if (dateStr.includes(sep)) {
+        const parts = dateStr.split(sep);
+        if (parts.length === 2) {
+          const part1 = parts[0].trim();
+          const part2 = parts[1].trim();
+          if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+            startDateStr = part1;
+            endDateStr = part2;
+            break;
+          }
+        }
+      }
+    }
+    
+    // 如果没有找到中文分隔符，检查其他分隔符
+    if (!startDateStr || !endDateStr) {
+      const otherSeparators = ['~', '～'];
+      for (const sep of otherSeparators) {
+        if (dateStr.includes(sep)) {
+          const parts = dateStr.split(sep);
+          if (parts.length === 2) {
+            const part1 = parts[0].trim();
+            const part2 = parts[1].trim();
+            if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+              startDateStr = part1;
+              endDateStr = part2;
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // 最后检查 '-' 分隔符（需要小心，因为单个日期也包含 '-'）
+    if (!startDateStr || !endDateStr) {
+      // 对于 '-' 分隔符，需要更智能的判断
+      // 尝试在所有 '-' 位置分割，找到能产生两个有效日期的分割点
+      const dashIndices = [];
+      for (let i = 0; i < dateStr.length; i++) {
+        if (dateStr[i] === '-') {
+          dashIndices.push(i);
+        }
+      }
+      
+      // 如果包含多个 '-'，尝试在中间位置分割
+      if (dashIndices.length >= 1) {
+        // 尝试每个 '-' 位置作为分割点
+        for (const dashIndex of dashIndices) {
+          const part1 = dateStr.substring(0, dashIndex).trim();
+          const part2 = dateStr.substring(dashIndex + 1).trim();
+          
+          // 验证两部分是否都是有效的日期格式
+          if (isValidDateFormat(part1) && isValidDateFormat(part2)) {
+            // 进一步验证：如果第一部分是单个日期格式（如 yyyy-MM-dd），
+            // 且第二部分也是单个日期格式，则认为是日期范围
+            // 但如果第一部分是 yyyy-MM-dd-yyyy-MM-dd 的一部分，则不是
+            const part1DashCount = (part1.match(/-/g) || []).length;
+            const part2DashCount = (part2.match(/-/g) || []).length;
+            
+            // 如果第一部分包含 2 个 '-'（yyyy-MM-dd），第二部分包含 2 个 '-'（yyyy-MM-dd），
+            // 或者第一部分使用 '/'，第二部分使用 '/'，则认为是日期范围
+            if ((part1DashCount === 2 && part2DashCount === 2) ||
+                (part1.includes('/') && part2.includes('/'))) {
+              startDateStr = part1;
+              endDateStr = part2;
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // 如果不是日期范围，返回单个日期
+    if (!startDateStr || !endDateStr) {
+      // 解析单个日期
+      let singleDate;
+      if (dateStr.includes('/')) {
+        const [year, month, day] = dateStr.split('/').map(Number);
+        if (year && month && day) {
+          singleDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        } else {
+          return [dateStr];
+        }
+      } else if (dateStr.includes('-')) {
+        // 检查是否是单个日期格式：yyyy-MM-dd
+        if (isValidDateFormat(dateStr)) {
+          singleDate = dateStr;
+        } else {
+          // 格式不标准，返回原始字符串
+          return [dateStr];
+        }
+      } else {
+        return [dateStr];
+      }
+      return [singleDate];
+    }
+    
+    // 解析开始日期和结束日期
+    const parseDate = (dateStr) => {
+      if (dateStr.includes('/')) {
+        const [year, month, day] = dateStr.split('/').map(Number);
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      } else if (dateStr.includes('-')) {
+        return dateStr;
+      } else {
+        throw new Error(`不支持的日期格式: ${dateStr}`);
+      }
+    };
+    
+    const startDate = parseDate(startDateStr);
+    const endDate = parseDate(endDateStr);
+    
+    // 验证日期格式
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+      Logger.log(`日期范围格式无效: ${dateStr}`);
+      return [dateStr];
+    }
+    
+    // 将日期字符串转换为 Date 对象进行比较
+    const start = new Date(startDate + 'T00:00:00');
+    const end = new Date(endDate + 'T00:00:00');
+    
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      Logger.log(`日期范围解析失败: ${dateStr}`);
+      return [dateStr];
+    }
+    
+    if (start > end) {
+      Logger.log(`日期范围无效（开始日期晚于结束日期）: ${dateStr}`);
+      return [dateStr];
+    }
+    
+    // 生成日期范围内的所有日期
+    const dates = [];
+    const current = new Date(start);
+    
+    while (current <= end) {
+      const year = current.getFullYear();
+      const month = String(current.getMonth() + 1).padStart(2, '0');
+      const day = String(current.getDate()).padStart(2, '0');
+      dates.push(`${year}-${month}-${day}`);
+      
+      // 移动到下一天
+      current.setDate(current.getDate() + 1);
+    }
+    
+    Logger.log(`解析日期范围: ${dateStr} -> ${dates.length} 个日期 (${dates[0]} 到 ${dates[dates.length - 1]})`);
+    
+    return dates;
+  } catch (error) {
+    Logger.log(`日期范围解析错误: ${dateInput} - ${error.message}`);
+    // 如果解析失败，返回原始字符串（作为单个日期处理）
+    return [String(dateInput)];
+  }
 }
 
 /**
