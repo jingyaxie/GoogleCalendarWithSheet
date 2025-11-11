@@ -114,6 +114,8 @@ const CONFIG = {
  * 创建自定义菜单（库模式）
  * 此函数可以被外部调用，用于在新表格中创建菜单
  * 
+ * 注意：此函数必须在用户交互上下文中调用（如 onOpen()），不能在库的上下文中直接调用
+ * 
  * @example
  * // 在新表格中使用：
  * function onOpen() {
@@ -121,17 +123,27 @@ const CONFIG = {
  * }
  */
 function createMenu() {
-  const ui = SpreadsheetApp.getUi();
-  
-  // 创建自定义菜单
-  ui.createMenu('📅 课程同步')
-    .addItem('🔄 执行同步', 'menuRunSync')
-    .addSeparator()
-    .addItem('📋 查看配置', 'menuViewConfig')
-    .addItem('📊 查看状态表', 'menuViewStatus')
-    .addSeparator()
-    .addItem('ℹ️ 关于', 'menuAbout')
-    .addToUi();
+  try {
+    // 尝试获取 UI（只能在用户交互上下文中使用）
+    const ui = SpreadsheetApp.getUi();
+    
+    // 创建自定义菜单
+    ui.createMenu('📅 课程同步')
+      .addItem('🔄 执行同步', 'menuRunSync')
+      .addSeparator()
+      .addItem('📋 查看配置', 'menuViewConfig')
+      .addItem('📊 查看状态表', 'menuViewStatus')
+      .addSeparator()
+      .addItem('ℹ️ 关于', 'menuAbout')
+      .addToUi();
+    
+    Logger.log('菜单创建成功');
+  } catch (error) {
+    // 如果无法获取 UI（例如在库的上下文中调用），记录错误但不抛出异常
+    Logger.log('无法创建菜单（可能不在用户交互上下文中）: ' + error.message);
+    // 不抛出异常，因为作为库使用时，菜单创建失败不应该影响其他功能
+    // 用户应该在用户表格的 onOpen() 中调用此函数
+  }
 }
 
 /**
@@ -1017,20 +1029,81 @@ function readCourseData(sheet, config) {
       const startTimeInput = row[headerMap['开始时间']] || '';
       const endTimeInput = row[headerMap['结束时间']] || '';
       
+      // 验证必要字段
+      if (!startTimeInput) {
+        Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段（开始时间）`);
+        continue;
+      }
+      
       // 获取记录ID（如果正式表有"记录ID"列，使用它）
       let recordId = '';
       if (headerMap['记录ID'] !== undefined) {
         recordId = row[headerMap['记录ID']] || '';
       }
       
+      // 读取所有自定义字段（排除"开始时间"、"结束时间"、"记录ID"）
+      const customFields = {};
+      // 定义需要排除的字段（不区分大小写）
+      // 使用精确匹配的字段（必须完全匹配）
+      const exactMatchFields = [
+        '开始时间', '结束时间', 
+        'start time', 'end time', 'starttime', 'endtime',
+        '开始', '结束', 'start', 'end'
+      ];
+      // 使用部分匹配的字段（包含这些关键词即可）
+      const partialMatchFields = [
+        '记录ID', '记录id', 'record id', 'recordid', 'id'
+      ];
+      
+      headers.forEach((header, index) => {
+        const rawHeader = String(header || '').trim();
+        if (!rawHeader) return; // 跳过空表头
+        
+        const cleanedHeader = cleanHeaderText(rawHeader);
+        const rawHeaderLower = rawHeader.toLowerCase();
+        const cleanedHeaderLower = cleanedHeader.toLowerCase();
+        
+        // 检查是否应该排除此字段
+        let shouldExclude = false;
+        
+        // 精确匹配检查（用于"开始时间"、"结束时间"等）
+        shouldExclude = exactMatchFields.some(excluded => {
+          const excludedLower = excluded.toLowerCase();
+          return rawHeaderLower === excludedLower || cleanedHeaderLower === excludedLower;
+        });
+        
+        // 部分匹配检查（用于"记录ID"等，避免误判）
+        if (!shouldExclude) {
+          shouldExclude = partialMatchFields.some(excluded => {
+            const excludedLower = excluded.toLowerCase();
+            // 对于"记录ID"相关字段，使用更严格的匹配：必须同时包含"记录"和"id"
+            if (excludedLower.includes('记录') || excludedLower.includes('record')) {
+              return (rawHeaderLower.includes('记录') || rawHeaderLower.includes('record')) && 
+                     rawHeaderLower.includes('id');
+            }
+            // 对于单独的"id"，只精确匹配（避免误判包含"id"的其他字段，如"地点"、"学生ID"等）
+            return rawHeaderLower === excludedLower || cleanedHeaderLower === excludedLower;
+          });
+        }
+        
+        if (!shouldExclude && row[index] !== undefined && String(row[index]).trim() !== '') {
+          // 存储原始表头和值
+          customFields[rawHeader] = String(row[index]).trim();
+        }
+      });
+      
       // 创建课程记录
       const course = {
-        lessonNumber: row[headerMap['课次']] || '',
+        // 保留原有字段以保持向后兼容
+        lessonNumber: customFields['课次'] || '',
+        courseTitle: customFields['课程内容/主题'] || customFields['课程内容'] || customFields['主题'] || '',
+        teacherName: customFields['老师'] || '',
+        studentName: customFields['学生'] || '',
+        // 时间字段
         startTimeInput: startTimeInput, // 保留原始开始时间输入（用于日志和调试）
         endTimeInput: endTimeInput, // 保留原始结束时间输入（用于日志和调试）
-        courseTitle: row[headerMap['课程内容/主题']] || '',
-        teacherName: row[headerMap['老师']] || '',
-        studentName: row[headerMap['学生']] || '',
+        // 所有自定义字段（包括上述字段，用于动态显示）
+        customFields: customFields,
         // 从配置中获取邮箱和日历ID
         teacherEmail: config.teacherEmail || '',
         studentEmail: config.studentEmail || '',
@@ -1040,14 +1113,14 @@ function readCourseData(sheet, config) {
         recordIdColumnIndex: headerMap['记录ID'] // 记录记录ID列的索引（用于后续更新）
       };
       
-      // 计算token
-      course.token = calculateCourseToken(course);
-      
       // 验证必要字段
-      if (!startTimeInput || !course.organizerCalendarId) {
-        Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段（开始时间或组织者日历ID）`);
+      if (!course.organizerCalendarId) {
+        Logger.log(`跳过无效记录（第${i+1}行）: 缺少必要字段（组织者日历ID）`);
         continue;
       }
+      
+      // 计算token
+      course.token = calculateCourseToken(course);
       
       courses.push(course);
     } catch (error) {
@@ -1174,7 +1247,7 @@ function readProcessedStatus(statusSheet) {
  */
 function ensureRecordIdColumn(mainSheet) {
   const headers = mainSheet.getRange(1, 1, 1, mainSheet.getLastColumn()).getValues()[0];
-  const hasRecordIdColumn = headers.some(header => header.trim() === '记录ID');
+  const hasRecordIdColumn = headers.some(header => String(header || '').trim() === '记录ID');
   
   if (!hasRecordIdColumn) {
     // 在最后一列添加"记录ID"列
@@ -1191,7 +1264,7 @@ function ensureRecordIdColumn(mainSheet) {
 function assignRecordIds(courses, processedRecords, statusSheet, mainSheet) {
   // 获取记录ID列的索引
   const headers = mainSheet.getRange(1, 1, 1, mainSheet.getLastColumn()).getValues()[0];
-  const recordIdColumnIndex = headers.findIndex(header => header.trim() === '记录ID');
+  const recordIdColumnIndex = headers.findIndex(header => String(header || '').trim() === '记录ID');
   
   if (recordIdColumnIndex === -1) {
     Logger.log(`警告：正式表中没有"记录ID"列`);
@@ -1973,15 +2046,30 @@ function calculateCourseToken(course) {
   const endTimeStr = String(course.endTimeInput || '');
   
   // 构建关键信息字符串
-  const keyInfo = [
-    startTimeStr,
-    endTimeStr,
-    String(course.courseTitle || ''),
-    String(course.teacherName || ''),
-    String(course.teacherEmail || ''),
-    String(course.studentName || ''),
-    String(course.studentEmail || '')
-  ].join('|');
+  // 如果存在 customFields，使用所有自定义字段（按字段名排序以确保一致性）
+  let keyInfo;
+  if (course.customFields && Object.keys(course.customFields).length > 0) {
+    const fieldValues = [];
+    // 先添加时间字段
+    fieldValues.push(startTimeStr, endTimeStr);
+    // 然后按字段名排序添加所有自定义字段的值
+    const sortedFieldNames = Object.keys(course.customFields).sort();
+    sortedFieldNames.forEach(fieldName => {
+      fieldValues.push(String(course.customFields[fieldName] || ''));
+    });
+    keyInfo = fieldValues.join('|');
+  } else {
+    // 向后兼容：如果没有 customFields，使用原有字段
+    keyInfo = [
+      startTimeStr,
+      endTimeStr,
+      String(course.courseTitle || ''),
+      String(course.teacherName || ''),
+      String(course.teacherEmail || ''),
+      String(course.studentName || ''),
+      String(course.studentEmail || '')
+    ].join('|');
+  }
   
   // 计算MD5哈希作为token
   const hash = Utilities.computeDigest(
@@ -2457,8 +2545,41 @@ function createOrUpdateCalendarEvent(calendarId, course, existingEventId, config
   Logger.log(`使用日历: ${calendar.getName()} (${calendar.getId()})，目标ID: ${calendarId}`);
   
   // 构建事件信息
-  const eventSummary = course.courseTitle;
-  const eventDescription = `课程：${course.courseTitle}\n老师：${course.teacherName}\n学生：${course.studentName}\n课次：${course.lessonNumber}`;
+  // 事件标题：优先使用"课程内容/主题"，否则使用第一个非时间字段，否则使用"未命名事件"
+  let eventSummary = '';
+  if (course.customFields) {
+    // 优先使用"课程内容/主题"相关字段
+    eventSummary = course.customFields['课程内容/主题'] || 
+                   course.customFields['课程内容'] || 
+                   course.customFields['主题'] || 
+                   course.customFields['Course Title'] || 
+                   course.customFields['课程主题'] || '';
+    
+    // 如果没有找到标题字段，使用第一个自定义字段的值
+    if (!eventSummary && Object.keys(course.customFields).length > 0) {
+      const firstFieldName = Object.keys(course.customFields)[0];
+      eventSummary = course.customFields[firstFieldName];
+    }
+  }
+  
+  // 如果还是没有，使用向后兼容的字段
+  if (!eventSummary) {
+    eventSummary = course.courseTitle || '未命名事件';
+  }
+  
+  // 构建事件描述：包含所有自定义字段（排除"开始时间"、"结束时间"、"记录ID"）
+  let eventDescription = '';
+  if (course.customFields && Object.keys(course.customFields).length > 0) {
+    // 按字段名排序，确保描述的一致性
+    const sortedFieldNames = Object.keys(course.customFields).sort();
+    const descriptionLines = sortedFieldNames.map(fieldName => {
+      return `${fieldName}：${course.customFields[fieldName]}`;
+    });
+    eventDescription = descriptionLines.join('\n');
+  } else {
+    // 向后兼容：如果没有 customFields，使用原有字段
+    eventDescription = `课程：${course.courseTitle || ''}\n老师：${course.teacherName || ''}\n学生：${course.studentName || ''}\n课次：${course.lessonNumber || ''}`;
+  }
   
   // 根据是否是全天事件，构建不同的开始和结束时间
   let eventStart, eventEnd;
